@@ -1,0 +1,12 @@
+pandas
+matplotlib
+seaborn
+tqdm>=4.46.1
+wandb
+torch
+torchvision
+cloudpickle~=1.2.0
+scipy
+numpy
+moviepy
+imageio
