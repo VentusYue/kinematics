@@ -96,7 +96,10 @@ def main():
     # Loop over routes
     for r_idx in tqdm(range(num_routes), desc="Sampling Cycles"):
         obs_seq = routes_obs[r_idx] # (T, 3, 64, 64)
-        target_actions = routes_actions[r_idx] # (T,)
+        target_actions = routes_actions[r_idx] # (T,) or (T, 1)
+        if target_actions.ndim > 1:
+            target_actions = target_actions.flatten()
+            
         T = obs_seq.shape[0]
         
         # We want to process `num_h0` samples in parallel
@@ -204,6 +207,20 @@ def main():
         
     print(f"Collected {len(cycles_hidden)} cycles from {num_routes} routes.")
     
+    # Debug logging
+    debug_log_path = os.path.join(os.path.dirname(local_args.out_npz), "pkd_debug.txt")
+    with open(debug_log_path, "w") as f:
+        f.write(f"PKD Cycle Sampler Debug Stats\n")
+        f.write(f"=============================\n")
+        f.write(f"Total Routes Processed: {num_routes}\n")
+        f.write(f"Cycles Collected: {len(cycles_hidden)}\n")
+        if len(cycles_match_ratio) > 0:
+            f.write(f"Match Ratio Stats: min={np.min(cycles_match_ratio):.4f}, mean={np.mean(cycles_match_ratio):.4f}, max={np.max(cycles_match_ratio):.4f}\n")
+            f.write(f"Converged Fraction: {np.mean(cycles_converged):.2f}\n")
+        else:
+            f.write("No cycles collected.\n")
+    print(f"Debug log saved to {debug_log_path}")
+
     os.makedirs(os.path.dirname(local_args.out_npz), exist_ok=True)
     np.savez_compressed(
         local_args.out_npz,

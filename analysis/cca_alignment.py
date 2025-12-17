@@ -172,6 +172,17 @@ def main():
         
         path_xy = routes_xy[r_id] # (T_route, 2)
         
+        # Filter out (0,0) artifacts from start of path
+        # Procgen maze coordinates are usually centered > 0
+        valid_start_idx = 0
+        for k in range(len(path_xy)):
+            if np.linalg.norm(path_xy[k]) > 0.1:
+                valid_start_idx = k
+                break
+        
+        if valid_start_idx < len(path_xy):
+            path_xy = path_xy[valid_start_idx:]
+        
         # Grid Step Normalization Heuristic
         # Procgen Maze grid step is usually around 24.0 or similar (depends on resolution).
         # We can check the diffs.
@@ -216,9 +227,52 @@ def main():
     sample_cycle_ids = np.array(sample_cycle_ids)
     
     print("Running CCA...")
-    A, B, r, U, V = canoncorr(X, Y, fullReturn=True)
+    
+    # Pre-CCA Dimensionality Reduction (PCA) to prevent overfitting
+    # We have num_cycles effective samples (degrees of freedom).
+    # If dimensions > num_cycles, CCA will find trivial 1.0 correlations.
+    
+    from sklearn.decomposition import PCA
+    
+    # Heuristic: dimension should be significantly smaller than N samples
+    # Keep 95% variance or cap at min(50, num_cycles // 2)
+    
+    # Standardize first (already done inside canoncorr but we do it before PCA)
+    X_std = (X - np.mean(X, axis=0)) / (np.std(X, axis=0) + 1e-6)
+    Y_std = (Y - np.mean(Y, axis=0)) / (np.std(Y, axis=0) + 1e-6)
+    
+    # Use num_cycles as the "effective N" for deciding components
+    n_comp_limit = max(5, int(num_cycles / 1.5)) 
+    n_comp = min(50, n_comp_limit)
+    
+    print(f"Applying PCA before CCA. Num Cycles: {num_cycles}")
+    print(f"Target components: {n_comp} (capped at 50 or N/1.5)")
+    
+    pca_x = PCA(n_components=n_comp)
+    pca_y = PCA(n_components=n_comp)
+    
+    X_pca = pca_x.fit_transform(X_std)
+    Y_pca = pca_y.fit_transform(Y_std)
+    
+    print(f"PCA Variance Explained - X: {np.sum(pca_x.explained_variance_ratio_):.2f}, Y: {np.sum(pca_y.explained_variance_ratio_):.2f}")
+    
+    A_pca, B_pca, r, U, V = canoncorr(X_pca, Y_pca, fullReturn=True)
     
     print(f"Top 5 correlations: {r[:5]}")
+
+    # Debug logging
+    debug_log_path = os.path.join(args.out_dir, "cca_debug.txt")
+    with open(debug_log_path, "w") as f:
+        f.write(f"CCA Debug Stats\n")
+        f.write(f"===============\n")
+        f.write(f"Num Cycles: {num_cycles}\n")
+        f.write(f"Original X shape: {X.shape}\n")
+        f.write(f"Original Y shape: {Y.shape}\n")
+        f.write(f"PCA components: {n_comp}\n")
+        f.write(f"PCA Variance X: {np.sum(pca_x.explained_variance_ratio_):.4f}\n")
+        f.write(f"PCA Variance Y: {np.sum(pca_y.explained_variance_ratio_):.4f}\n")
+        f.write(f"Top 10 Correlations: {r[:10]}\n")
+    print(f"Debug log saved to {debug_log_path}")
     
     # Save lollipop
     plot_lollipop(r[:args.num_modes], os.path.join(args.out_dir, "cca_lollipop.png"))

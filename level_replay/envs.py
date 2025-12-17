@@ -9,6 +9,10 @@ from functools import partial
 from typing import Callable, List, Tuple, Union
 
 import gym
+import warnings
+# Filter gym_minigrid deprecation warning and general gym warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="gym.envs.registration")
+warnings.filterwarnings("ignore", category=UserWarning, module="gym")
 import numpy as np
 import torch
 import wandb

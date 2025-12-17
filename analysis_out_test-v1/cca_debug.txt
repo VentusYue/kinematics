@@ -1,0 +1,9 @@
+CCA Debug Stats
+===============
+Num Cycles: 3
+Original X shape: (317, 256)
+Original Y shape: (317, 441)
+PCA components: 5
+PCA Variance X: 0.9969
+PCA Variance Y: 1.0000
+Top 10 Correlations: [0.99999416 0.99993724 0.08202512 0.04597205 0.00493178]
