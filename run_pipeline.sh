@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # Configuration
-SUFFIX="test-v1" # Change this suffix to update all filenames (e.g., "multi", "final", etc.)
+SUFFIX="test-2000" # Change this suffix to update all filenames (e.g., "multi", "final", etc.)
 ENV_NAME="maze"
 MODEL_CKPT="/root/logs/ppo/meta-rl-maze-dense-long-n1280meta-40gpu1/model.tar"
-NUM_TASKS=200
+NUM_TASKS=2000
 TRIALS_PER_TASK=5
 DETERMINISTIC=0
 NUM_PROCESSES=128

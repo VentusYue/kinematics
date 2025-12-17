@@ -58,7 +58,7 @@ def main():
     local_parser.add_argument("--num_h0", type=int, default=20, help="Number of initial hidden states to sample per route")
     local_parser.add_argument("--warmup_periods", type=int, default=8, help="Number of periods to warmup")
     local_parser.add_argument("--sample_periods", type=int, default=2, help="Number of periods to check convergence")
-    local_parser.add_argument("--ac_match_thresh", type=float, default=0.95, help="Action consistency threshold")
+    local_parser.add_argument("--ac_match_thresh", type=float, default=0.70, help="Action consistency threshold")
     local_parser.add_argument("--device", type=str, default="cuda:0", help="Device")
     local_parser.add_argument("--max_routes", type=int, default=None, help="Max routes to process (for debugging)")
     
@@ -92,6 +92,10 @@ def main():
     cycles_route_id = []
     cycles_match_ratio = []
     cycles_converged = []
+    
+    # Statistics for debugging
+    stat_match_ratios = []
+    stat_diffs = []
     
     # Loop over routes
     for r_idx in tqdm(range(num_routes), desc="Sampling Cycles"):
@@ -144,6 +148,9 @@ def main():
             # diff: (N,)
             diffs = torch.mean(torch.norm(last_period_h - prev_period_h, dim=2), dim=0).cpu().numpy()
             
+            # Store stats for all samples
+            stat_diffs.extend(diffs.flatten().tolist())
+            
             # Compute actions for last period
             # Flatten last period h for distribution: (T*N, H)
             last_period_h_flat = last_period_h.view(T * N, hidden_size)
@@ -158,6 +165,9 @@ def main():
             # matches: (T, N)
             matches = (modes == target)
             match_ratios = np.mean(matches, axis=0) # (N,)
+            
+            # Store stats
+            stat_match_ratios.extend(match_ratios.flatten().tolist())
             
             # Select best candidate
             # Filter by match threshold
@@ -214,8 +224,32 @@ def main():
         f.write(f"=============================\n")
         f.write(f"Total Routes Processed: {num_routes}\n")
         f.write(f"Cycles Collected: {len(cycles_hidden)}\n")
+        f.write(f"Parameters:\n")
+        f.write(f"  Match Threshold: {local_args.ac_match_thresh}\n")
+        f.write(f"  Num H0: {local_args.num_h0}\n")
+        
+        if len(stat_match_ratios) > 0:
+            mr = np.array(stat_match_ratios)
+            f.write(f"Global Match Ratio Stats:\n")
+            f.write(f"  Mean: {np.mean(mr):.4f}\n")
+            f.write(f"  Median: {np.median(mr):.4f}\n")
+            f.write(f"  Min: {np.min(mr):.4f}\n")
+            f.write(f"  Max: {np.max(mr):.4f}\n")
+            f.write(f"  >0.95: {np.sum(mr >= 0.95)} / {len(mr)}\n")
+            f.write(f"  >0.90: {np.sum(mr >= 0.90)} / {len(mr)}\n")
+            f.write(f"  >0.80: {np.sum(mr >= 0.80)} / {len(mr)}\n")
+            f.write(f"  >0.70: {np.sum(mr >= 0.70)} / {len(mr)}\n")
+            
+        if len(stat_diffs) > 0:
+            df = np.array(stat_diffs)
+            f.write(f"Global Convergence Diff Stats:\n")
+            f.write(f"  Mean: {np.mean(df):.4f}\n")
+            f.write(f"  Median: {np.median(df):.4f}\n")
+            f.write(f"  Min: {np.min(df):.4f}\n")
+            f.write(f"  Max: {np.max(df):.4f}\n")
+
         if len(cycles_match_ratio) > 0:
-            f.write(f"Match Ratio Stats: min={np.min(cycles_match_ratio):.4f}, mean={np.mean(cycles_match_ratio):.4f}, max={np.max(cycles_match_ratio):.4f}\n")
+            f.write(f"Collected Cycles Match Ratio Stats: min={np.min(cycles_match_ratio):.4f}, mean={np.mean(cycles_match_ratio):.4f}, max={np.max(cycles_match_ratio):.4f}\n")
             f.write(f"Converged Fraction: {np.mean(cycles_converged):.2f}\n")
         else:
             f.write("No cycles collected.\n")
