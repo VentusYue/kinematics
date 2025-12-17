@@ -15,7 +15,7 @@ DEVICE="cuda:1" # Updated to GPU 1
 # Derived filenames
 ROUTES_NPZ="analysis_data/routes_${SUFFIX}.npz"
 CYCLES_NPZ="analysis_data/pkd_cycles_${SUFFIX}.npz"
-OUT_DIR="analysis_out_${SUFFIX}"
+OUT_DIR="results/analysis_out_${SUFFIX}"
 
 echo "=================================================="
 echo "Running Pipeline with Suffix: ${SUFFIX}"

@@ -48,7 +48,6 @@ temp/
 
 # Analysis Data and Output
 analysis_data/
-analysis_out/
-analysis_out_test/
-analysis_out_test_fast/
+analysis_out*/
 meta_eval_traces/
+results/
