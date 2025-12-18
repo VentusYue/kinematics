@@ -31,6 +31,7 @@ NUM_H0=20               # Number of random h0 to sample per route
 WARMUP_PERIODS=8        # Periods to warmup
 SAMPLE_PERIODS=2        # Periods to check convergence
 AC_MATCH_THRESH=0.8     # Action consistency threshold
+SEED=42                 # Random seed for reproducibility
 
 # =============================================================================
 # CCA PARAMETERS
@@ -121,7 +122,8 @@ python analysis/pkd_cycle_sampler.py \
     --num_h0=${NUM_H0} \
     --warmup_periods=${WARMUP_PERIODS} \
     --sample_periods=${SAMPLE_PERIODS} \
-    --ac_match_thresh=${AC_MATCH_THRESH}
+    --ac_match_thresh=${AC_MATCH_THRESH} \
+    --seed=${SEED}
 
 PKD_END=$(date +%s)
 PKD_TIME=$((PKD_END - PKD_START))

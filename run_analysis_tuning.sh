@@ -12,7 +12,7 @@ set -e  # Exit on error
 # =============================================================================
 
 # Experiment name for this analysis run
-EXP_NAME="run_easy_2e5_analysis_ac95"
+EXP_NAME="run_easy_2e5_analysis_filter50_ac95"
 
 # Source routes data (from a previous collection run)
 SOURCE_ROUTES="/root/backup/kinematics/experiments/run_easy_2e5/data/routes.npz"
@@ -30,11 +30,11 @@ BASE_OUT_DIR="/root/backup/kinematics/experiments"
 NUM_H0=20               # Number of random h0 to sample per route
 WARMUP_PERIODS=8        # Periods to warmup
 SAMPLE_PERIODS=2        # Periods to check convergence
-AC_MATCH_THRESH=0.8     # Action consistency threshold
+AC_MATCH_THRESH=0.95     # Action consistency threshold
 
 # Length filtering (set to empty string "" for no limit / original behavior)
-MIN_LENGTH=""           # Minimum sequence length (e.g., 5)
-MAX_LENGTH=""           # Maximum sequence length (e.g., 15)
+MIN_LENGTH="3"           # Minimum sequence length (e.g., 5)
+MAX_LENGTH="50"           # Maximum sequence length (e.g., 15)
 
 # =============================================================================
 # CCA PARAMETERS

@@ -191,11 +191,20 @@ def main():
     local_parser.add_argument("--no_amp", action="store_true", help="Disable automatic mixed precision")
     local_parser.add_argument("--min_length", type=int, default=None, help="Minimum sequence length to include (default: no limit)")
     local_parser.add_argument("--max_length", type=int, default=None, help="Maximum sequence length to include (default: no limit)")
+    local_parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     
     local_args, _ = local_parser.parse_known_args()
     args = get_args()
     args.model_ckpt = local_args.model_ckpt
     
+    # Set seeds for reproducibility
+    if local_args.seed is not None:
+        print(f"Setting random seed to {local_args.seed}")
+        np.random.seed(local_args.seed)
+        torch.manual_seed(local_args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(local_args.seed)
+            
     device = torch.device(local_args.device if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
