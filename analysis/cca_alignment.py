@@ -18,7 +18,7 @@ def canoncorr(X0: np.array, Y0: np.array, fullReturn: bool = False) -> np.array:
     p2 = Y0.shape[1]
     
     # Data diagnostics
-    print(f"X shape: {X0.shape}, Y shape: {Y0.shape}")
+    print(f"  X shape: {X0.shape}, Y shape: {Y0.shape}")
     
     if p1 >= n or p2 >= n:
         logging.warning('Not enough samples, might cause problems')
@@ -27,6 +27,13 @@ def canoncorr(X0: np.array, Y0: np.array, fullReturn: bool = False) -> np.array:
     # Handle constant columns to avoid division by zero
     X_std = np.std(X0, 0)
     Y_std = np.std(Y0, 0)
+    
+    # Count constant columns
+    x_const = (X_std == 0).sum()
+    y_const = (Y_std == 0).sum()
+    if x_const > 0 or y_const > 0:
+        print(f"  [warn] Constant columns: X={x_const}/{p1}, Y={y_const}/{p2}")
+    
     X_std[X_std == 0] = 1.0
     Y_std[Y_std == 0] = 1.0
     
@@ -42,7 +49,7 @@ def canoncorr(X0: np.array, Y0: np.array, fullReturn: bool = False) -> np.array:
     rankX = np.sum(np.abs(np.diagonal(T11)) > tol * np.abs(T11[0, 0]))
     rankY = np.sum(np.abs(np.diagonal(T22)) > tol * np.abs(T22[0, 0]))
 
-    print(f"Rank of X: {rankX}, Rank of Y: {rankY}")
+    print(f"  Rank of X: {rankX}, Rank of Y: {rankY}")
 
     if rankX == 0:
         raise ValueError('X has zero rank')
@@ -104,27 +111,45 @@ def plot_lollipop(scores, out_path, title="Canonical Correlation", xlabel="Mode"
 def plot_alignment(U_means, V_means, colors, out_path, title="Alignment"):
     """
     Scatter plot of U vs V
-    U_means: (N_cycles, 2) - typically CM0 vs CM1
-    V_means: (N_cycles, 2)
+    U_means: (N_cycles, d) - typically CM0 vs CM1
+    V_means: (N_cycles, d)
     colors: (N_cycles,) for color coding (e.g. length)
     """
+    n_points = len(colors)
+    print(f"  Plotting {n_points} points")
+    
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     
+    # Add small jitter to reveal overlapping points
+    jitter_scale_u = 0.02 * (U_means[:, :2].max() - U_means[:, :2].min() + 1e-6)
+    jitter_scale_v = 0.02 * (V_means[:, :2].max() - V_means[:, :2].min() + 1e-6)
+    
+    jitter_u = np.random.randn(n_points, 2) * jitter_scale_u
+    jitter_v = np.random.randn(n_points, 2) * jitter_scale_v
+    
     # Left: Neural (U)
-    sc1 = axes[0].scatter(U_means[:, 0], U_means[:, 1], c=colors, cmap='viridis', alpha=0.7)
-    axes[0].set_title("Neural State (CM0 vs CM1)")
+    sc1 = axes[0].scatter(
+        U_means[:, 0] + jitter_u[:, 0], 
+        U_means[:, 1] + jitter_u[:, 1], 
+        c=colors, cmap='viridis', alpha=0.7, s=50, edgecolors='black', linewidths=0.5
+    )
+    axes[0].set_title(f"Neural State (CM0 vs CM1) - {n_points} points")
     axes[0].set_xlabel("CM 0")
     axes[0].set_ylabel("CM 1")
     plt.colorbar(sc1, ax=axes[0], label='Episode Length')
     
     # Right: Behavior (V)
-    sc2 = axes[1].scatter(V_means[:, 0], V_means[:, 1], c=colors, cmap='viridis', alpha=0.7)
-    axes[1].set_title("Behavior Ridge (CM0 vs CM1)")
+    sc2 = axes[1].scatter(
+        V_means[:, 0] + jitter_v[:, 0], 
+        V_means[:, 1] + jitter_v[:, 1], 
+        c=colors, cmap='viridis', alpha=0.7, s=50, edgecolors='black', linewidths=0.5
+    )
+    axes[1].set_title(f"Behavior Ridge (CM0 vs CM1) - {n_points} points")
     axes[1].set_xlabel("CM 0")
     axes[1].set_ylabel("CM 1")
     plt.colorbar(sc2, ax=axes[1], label='Episode Length')
     
-    plt.suptitle(title)
+    plt.suptitle(f"{title} (n={n_points})")
     plt.tight_layout()
     plt.savefig(out_path, dpi=300)
     plt.close()
@@ -139,7 +164,11 @@ def main():
     
     os.makedirs(args.out_dir, exist_ok=True)
     
-    print(f"Loading cycles from {args.cycles_npz}")
+    print("="*60)
+    print("CCA ALIGNMENT ANALYSIS")
+    print("="*60)
+    
+    print(f"\nLoading cycles from {args.cycles_npz}")
     pkd_data = np.load(args.cycles_npz, allow_pickle=True)
     cycles_hidden = pkd_data['cycles_hidden']
     cycles_route_id = pkd_data['cycles_route_id']
@@ -151,7 +180,55 @@ def main():
     routes_ep_len = routes_data['routes_ep_len']
     
     num_cycles = len(cycles_hidden)
-    print(f"Processing {num_cycles} cycles")
+    print(f"\nProcessing {num_cycles} cycles")
+    
+    if num_cycles == 0:
+        print("[ERROR] No cycles found! Cannot run CCA.")
+        return
+    
+    # =========================================================================
+    # INPUT DATA DIAGNOSTICS
+    # =========================================================================
+    print("\n" + "-"*40)
+    print("INPUT DATA DIAGNOSTICS")
+    print("-"*40)
+    
+    # Cycle statistics
+    cycle_lens = [c.shape[0] for c in cycles_hidden]
+    hidden_dims = [c.shape[1] if c.ndim > 1 else 256 for c in cycles_hidden]
+    print(f"\n[Cycles]")
+    print(f"  Number: {num_cycles}")
+    print(f"  Lengths: min={min(cycle_lens)}, max={max(cycle_lens)}, mean={np.mean(cycle_lens):.1f}")
+    print(f"  Hidden dim: {hidden_dims[0]}")
+    print(f"  Match ratios: min={cycles_match_ratio.min():.3f}, max={cycles_match_ratio.max():.3f}")
+    
+    # Route XY statistics
+    print(f"\n[Routes XY]")
+    unique_routes = np.unique(cycles_route_id)
+    print(f"  Unique routes used: {len(unique_routes)}")
+    
+    xy_variances = []
+    xy_ranges = []
+    for r_id in unique_routes:
+        xy = routes_xy[r_id]
+        if xy.shape[0] > 0:
+            var = np.var(xy, axis=0).sum()
+            xy_variances.append(var)
+            xy_ranges.append(xy.max(axis=0) - xy.min(axis=0))
+    
+    if xy_variances:
+        xy_var_arr = np.array(xy_variances)
+        print(f"  XY variance: min={xy_var_arr.min():.4f}, max={xy_var_arr.max():.4f}, mean={xy_var_arr.mean():.4f}")
+        low_var = (xy_var_arr < 1e-6).sum()
+        if low_var > 0:
+            print(f"  [WARN] {low_var} routes have near-zero variance!")
+    
+    # =========================================================================
+    # BUILD DATA MATRICES
+    # =========================================================================
+    print("\n" + "-"*40)
+    print("BUILDING DATA MATRICES")
+    print("-"*40)
     
     X_samples = []
     Y_samples = []
@@ -159,6 +236,10 @@ def main():
     
     # For alignment plot later
     cycle_lengths = []
+    
+    # Ridge embedding statistics
+    ridge_vecs = []
+    est_grid_steps = []
     
     for i in range(num_cycles):
         h_cycle = cycles_hidden[i] # (L, H)
@@ -185,6 +266,8 @@ def main():
                 est_grid_step = 1.0
         else:
             est_grid_step = 1.0
+        
+        est_grid_steps.append(est_grid_step)
             
         # Normalize
         # Avoid division by zero
@@ -194,15 +277,10 @@ def main():
         path_tile = path_xy / est_grid_step
         
         # Compute ridge embedding
-        # We use the whole route path to generate the ridge image for this trial
-        # And replicate it for every step in the cycle?
-        # Yes, Section 7.1: "Y: stack corresponding ridge_vec... same cycle will repeat same ridge_vec"
-        
         ridge_vec = build_ridge_vector(path_tile) # (441,)
+        ridge_vecs.append(ridge_vec)
         
         # Hiddens
-        # h_cycle is (L, H)
-        # Add to lists
         L = h_cycle.shape[0]
         
         X_samples.append(h_cycle)
@@ -215,15 +293,72 @@ def main():
     Y = np.concatenate(Y_samples, axis=0).astype(np.float32)
     sample_cycle_ids = np.array(sample_cycle_ids)
     
-    print("Running CCA...")
-    A, B, r, U, V = canoncorr(X, Y, fullReturn=True)
+    print(f"\n[Matrix X (Neural)]")
+    print(f"  Shape: {X.shape}")
+    print(f"  Value range: [{X.min():.3f}, {X.max():.3f}]")
+    print(f"  Mean: {X.mean():.3f}, Std: {X.std():.3f}")
     
-    print(f"Top 5 correlations: {r[:5]}")
+    print(f"\n[Matrix Y (Ridge)]")
+    print(f"  Shape: {Y.shape}")
+    print(f"  Value range: [{Y.min():.3f}, {Y.max():.3f}]")
+    print(f"  Mean: {Y.mean():.3f}, Std: {Y.std():.3f}")
+    
+    # Check ridge embedding diversity
+    ridge_arr = np.array(ridge_vecs)
+    ridge_normed = ridge_arr / (np.linalg.norm(ridge_arr, axis=1, keepdims=True) + 1e-8)
+    cos_sim = ridge_normed @ ridge_normed.T
+    cos_sim_off_diag = cos_sim[np.triu_indices(num_cycles, k=1)]
+    print(f"\n[Ridge Embedding Diversity]")
+    print(f"  Pairwise cosine similarity: min={cos_sim_off_diag.min():.4f}, max={cos_sim_off_diag.max():.4f}, mean={cos_sim_off_diag.mean():.4f}")
+    if cos_sim_off_diag.mean() > 0.95:
+        print(f"  [WARN] Ridge embeddings are very similar (mean cos_sim > 0.95)!")
+        print(f"         This may limit CCA's ability to find meaningful correlations.")
+    
+    # =========================================================================
+    # RUN CCA
+    # =========================================================================
+    print("\n" + "-"*40)
+    print("RUNNING CCA")
+    print("-"*40)
+    
+    try:
+        A, B, r, U, V = canoncorr(X, Y, fullReturn=True)
+    except Exception as e:
+        print(f"[ERROR] CCA failed: {e}")
+        return
+    
+    print(f"\n[CCA Results]")
+    print(f"  Number of modes: {len(r)}")
+    print(f"  Top {min(10, len(r))} correlations: {r[:10]}")
+    
+    # Analyze correlation distribution
+    high_corr = (r > 0.9).sum()
+    mid_corr = ((r > 0.5) & (r <= 0.9)).sum()
+    low_corr = (r <= 0.5).sum()
+    print(f"\n[Correlation Distribution]")
+    print(f"  High (>0.9): {high_corr}")
+    print(f"  Medium (0.5-0.9): {mid_corr}")
+    print(f"  Low (<=0.5): {low_corr}")
+    
+    if high_corr == len(r) and len(r) > 5:
+        print(f"\n[WARN] All correlations are >0.9!")
+        print(f"       This usually indicates:")
+        print(f"       1. Low sample diversity (too few unique routes)")
+        print(f"       2. Ridge embeddings are too similar")
+        print(f"       3. Overfitting due to low-rank data")
     
     # Save lollipop
-    plot_lollipop(r[:args.num_modes], os.path.join(args.out_dir, "cca_lollipop.png"))
+    lollipop_path = os.path.join(args.out_dir, "cca_lollipop.png")
+    plot_lollipop(r[:args.num_modes], lollipop_path)
+    print(f"\nSaved lollipop plot to {lollipop_path}")
     
-    # Aggregate for Figure 5
+    # =========================================================================
+    # AGGREGATE FOR FIGURE 5
+    # =========================================================================
+    print("\n" + "-"*40)
+    print("AGGREGATING FOR ALIGNMENT PLOT")
+    print("-"*40)
+    
     # We want one point per cycle
     U_means = []
     V_means = []
@@ -236,18 +371,45 @@ def main():
         u_mean = np.mean(U[indices], axis=0)
         U_means.append(u_mean)
         
-        # V mean (should be constant)
+        # V mean (should be constant since ridge is constant per cycle)
         v_mean = np.mean(V[indices], axis=0)
         V_means.append(v_mean)
         
     U_means = np.array(U_means)
     V_means = np.array(V_means)
     
-    # Plot Figure 5
-    plot_alignment(U_means, V_means, cycle_lengths, os.path.join(args.out_dir, "figure5_alignment.png"))
+    print(f"  U_means shape: {U_means.shape}")
+    print(f"  V_means shape: {V_means.shape}")
     
-    print("Done!")
+    # Check spread in canonical space
+    u_spread = U_means[:, :2].std(axis=0)
+    v_spread = V_means[:, :2].std(axis=0)
+    print(f"  U spread (CM0, CM1): {u_spread}")
+    print(f"  V spread (CM0, CM1): {v_spread}")
+    
+    # Plot Figure 5
+    alignment_path = os.path.join(args.out_dir, "figure5_alignment.png")
+    plot_alignment(U_means, V_means, cycle_lengths, alignment_path)
+    print(f"Saved alignment plot to {alignment_path}")
+    
+    # =========================================================================
+    # SAVE DETAILED RESULTS
+    # =========================================================================
+    results_path = os.path.join(args.out_dir, "cca_results.npz")
+    np.savez_compressed(
+        results_path,
+        correlations=r,
+        U_means=U_means,
+        V_means=V_means,
+        cycle_lengths=np.array(cycle_lengths),
+        ridge_cosine_sim_mean=float(cos_sim_off_diag.mean()),
+        num_cycles=num_cycles,
+    )
+    print(f"Saved detailed results to {results_path}")
+    
+    print("\n" + "="*60)
+    print("CCA ANALYSIS COMPLETE")
+    print("="*60)
 
 if __name__ == "__main__":
     main()
-

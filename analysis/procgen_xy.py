@@ -25,24 +25,50 @@ except Exception as e:
     traceback.print_exc()
     maze = None
 
+
+def _nan_triplet():
+    return float("nan"), float("nan"), float("nan")
+
+
+def _find_env_method_venv(venv):
+    """
+    Walk through `.venv` wrappers to find the first object exposing `env_method`
+    (e.g. a `SubprocVecEnv`). Returns None if not found.
+    """
+    cur = venv
+    for _ in range(64):
+        if hasattr(cur, "env_method"):
+            return cur
+        if hasattr(cur, "venv"):
+            cur = cur.venv
+        else:
+            break
+    return None
+
 def get_xy_from_venv(venv, env_idx=0):
     """
     Extract (x, y) and grid_step from a procgen maze venv.
     """
     if maze is None:
-        return 0.0, 0.0, 0.0
+        return _nan_triplet()
     
     # Handle SubprocVecEnv (special case for retrieving from remote)
     # venv might be VecPyTorchProcgen wrapping SubprocVecEnv
-    if hasattr(venv, "venv"):
-        if hasattr(venv.venv, "env_method"): # SubprocVecEnv has env_method
+    env_method_venv = _find_env_method_venv(venv)
+    if env_method_venv is not None:
+        # Call get_xy on the specific worker; we assume the worker env has a
+        # get_xy() method (via a wrapper like XYWrapper).
+        try:
+            res = env_method_venv.env_method("get_xy", indices=env_idx)
+            if res and len(res) > 0:
+                return res[0]
+        except Exception:
+            # Some VecEnv APIs expect a list of indices.
             try:
-                # Call get_xy on the specific worker
-                # We assume the worker env has a get_xy method (via wrapper)
-                res = venv.venv.env_method("get_xy", indices=env_idx)
+                res = env_method_venv.env_method("get_xy", indices=[env_idx])
                 if res and len(res) > 0:
                     return res[0]
-            except Exception as e:
+            except Exception:
                 pass
     
     # Standard logic for local ProcgenEnv
@@ -61,14 +87,35 @@ def get_xy_from_venv(venv, env_idx=0):
         return _parse_state(state)
         
     except Exception as e:
-        return 0.0, 0.0, 0.0
+        return _nan_triplet()
+
+def get_xy_batch(venv):
+    """
+    Batch version of get_xy_from_venv for all envs.
+    Returns a list of (x, y, grid_step) tuples, one for each env.
+    """
+    if maze is None:
+        return [_nan_triplet()] * venv.num_envs
+    
+    env_method_venv = _find_env_method_venv(venv)
+    if env_method_venv is not None:
+        try:
+            # Call get_xy on all workers at once
+            results = env_method_venv.env_method("get_xy")
+            if results and len(results) == venv.num_envs:
+                return results
+        except Exception:
+            pass
+            
+    # Fallback to serial
+    return [get_xy_from_venv(venv, i) for i in range(venv.num_envs)]
 
 def get_xy_from_gym_env(env):
     """
     Extract (x, y) from a single Gym env (Procgen wrapped)
     """
     if maze is None:
-        return 0.0, 0.0, 0.0
+        return _nan_triplet()
     
     try:
         # Unwrap until we find something with callmethod (Gym3 env)
@@ -85,9 +132,9 @@ def get_xy_from_gym_env(env):
             return _parse_state(state)
             
     except Exception as e:
-        pass
+        return _nan_triplet()
         
-    return 0.0, 0.0, 0.0
+    return _nan_triplet()
 
 def _parse_state(state):
     vals = state.state_vals

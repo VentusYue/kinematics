@@ -41,7 +41,7 @@ models/
 checkpoints/
 videos/
 rnn_traces/
-
+experiments/
 # Data or temp files that may be generated during runs
 tmp/
 temp/
