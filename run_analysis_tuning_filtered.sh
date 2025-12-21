@@ -64,7 +64,7 @@ BASE_OUT_DIR="/root/backup/kinematics/experiments"
 
 NUM_H0=20               # Number of random h0 to sample per route
 WARMUP_PERIODS=8        # Periods to warmup
-SAMPLE_PERIODS=2        # Periods to check convergence
+SAMPLE_PERIODS=4        # Periods to check convergence
 AC_MATCH_THRESH=0.8     # Action consistency threshold
 SEED=42                 # Random seed for reproducibility
 

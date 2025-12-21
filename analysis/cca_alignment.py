@@ -475,43 +475,6 @@ def main():
     print(f"Saved alignment plot to {alignment_path}")
     
     # =========================================================================
-    # SAVE SAMPLE RIDGE IMAGES
-    # =========================================================================
-    print("\n" + "-"*40)
-    print("SAVING SAMPLE RIDGE IMAGES")
-    print("-"*40)
-    
-    # Randomly select 10 ridge images to visualize
-    num_samples = min(10, len(ridge_vecs))
-    if num_samples > 0:
-        # Use truly random seed based on current time for different samples each run
-        import time
-        np.random.seed(int(time.time() * 1000) % (2**32))
-        sample_indices = np.random.choice(len(ridge_vecs), size=num_samples, replace=False)
-        
-        print(f"  Randomly selected {num_samples} ridge images to save")
-        
-        for idx, sample_idx in enumerate(sample_indices):
-            ridge_vec = ridge_vecs[sample_idx]
-            # Reshape from 441-dim vector back to 21x21 image
-            ridge_img = ridge_vec.reshape(21, 21)
-            
-            # Create visualization
-            fig, ax = plt.subplots(figsize=(6, 6))
-            im = ax.imshow(ridge_img, cmap='hot', interpolation='nearest')
-            ax.set_title(f"Ridge Image {idx+1} (Cycle {sample_idx})")
-            ax.set_xlabel("X")
-            ax.set_ylabel("Y")
-            plt.colorbar(im, ax=ax, label='Ridge Value')
-            
-            # Save
-            ridge_img_path = os.path.join(args.out_dir, f"ridge_sample_{idx+1:02d}.png")
-            plt.savefig(ridge_img_path, dpi=150, bbox_inches='tight')
-            plt.close()
-        
-        print(f"  Saved {num_samples} ridge images to {args.out_dir}/ridge_sample_*.png")
-    
-    # =========================================================================
     # PLOT ALL PATH_TILES OVERLAY (Center-aligned, exclude last point)
     # =========================================================================
     print("\n" + "-"*40)
@@ -530,6 +493,9 @@ def main():
         start_points_x = []
         start_points_y = []
         
+        # For counting unique trajectories
+        path_signatures = []
+        
         for path in all_path_tiles:
             if len(path) > 2:  # Need at least 3 points (to have 2+ after removing last)
                 # Remove the last point from each path
@@ -541,6 +507,24 @@ def main():
                 # Collect start points (should all be at origin)
                 start_points_x.append(path_trimmed[0, 0])
                 start_points_y.append(path_trimmed[0, 1])
+                
+                # Create signature for uniqueness check
+                # Round to 3 decimal places to handle floating point precision
+                path_rounded = np.round(path_trimmed, decimals=3)
+                # Convert to tuple of tuples for hashing
+                path_signature = tuple(map(tuple, path_rounded))
+                path_signatures.append(path_signature)
+        
+        # Count unique trajectories
+        unique_paths = set(path_signatures)
+        num_unique = len(unique_paths)
+        num_total = len(path_signatures)
+        
+        print(f"\n  [Trajectory Diversity]")
+        print(f"  Total trajectories: {num_total}")
+        print(f"  Unique trajectories: {num_unique}")
+        print(f"  Duplicate ratio: {(num_total - num_unique)/max(1, num_total)*100:.1f}%")
+        print(f"  Diversity ratio: {num_unique/max(1, num_total)*100:.1f}%")
         
         # Use LineCollection to plot all paths at once
         if line_segments:
