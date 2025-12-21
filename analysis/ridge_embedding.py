@@ -1,7 +1,7 @@
 
 import numpy as np
 
-def build_radiance_field(p, grid_size=21, center=10, scale=1.414, top=10.0, bottom=0.0):
+def build_radiance_field(p, grid_size=21, center=10, scale=0.15, top=10.0, bottom=0.0):
     """构建单个点的辐射场"""
     img = np.zeros((grid_size, grid_size))
     effective_radius = grid_size * scale
@@ -26,7 +26,7 @@ def get_max_radiance_field(imgs):
     img = np.max(imgs, axis=0)
     return img
 
-def build_ridge(path, grid_size=21):
+def build_ridge(path, grid_size=21, scale=0.15):
     """
     将路径转换为ridge image
     path: (T, 2) array of coordinates
@@ -45,16 +45,16 @@ def build_ridge(path, grid_size=21):
     # 对每个点计算辐射场图像
     imgs = []
     for i in range(A.shape[0]):
-        imgs.append(build_radiance_field(A[i], grid_size=grid_size, center=center))
+        imgs.append(build_radiance_field(A[i], grid_size=grid_size, center=center, scale=scale))
     imgs = np.array(imgs)
     
     img = get_max_radiance_field(imgs)
     return img
 
-def build_ridge_vector(path, grid_size=21):
+def build_ridge_vector(path, grid_size=21, scale=0.15):
     """
     Return flattened ridge image
     """
-    img = build_ridge(path, grid_size)
+    img = build_ridge(path, grid_size, scale=scale)
     return img.flatten()
 
