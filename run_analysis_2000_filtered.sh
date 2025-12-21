@@ -1,8 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # Meta-RL Behavior-Neural Alignment Pipeline (Analysis Only)
-# Skips collection, uses existing routes data
-# Runs: pkd_cycle_sampler -> cca_alignment
+# Analyzes the run_easy_2000 dataset with updated filtering
 # =============================================================================
 
 set -e  # Exit on error
@@ -12,36 +11,37 @@ set -e  # Exit on error
 # =============================================================================
 
 # Experiment name for this analysis run
-EXP_NAME="run_easy_2e5_analysis_filter15_ac80_15"
+EXP_NAME="run_easy_2000_analysis_filtered_ac95"
 
-# Source routes data (from a previous collection run)
-SOURCE_ROUTES="/root/backup/kinematics/experiments/run_easy_2e5/data/routes.npz"
+# Source routes data (from the original 2000 collection)
+SOURCE_ROUTES="/root/backup/kinematics/experiments/run_easy_2000_original/data/routes.npz"
 
-# Model checkpoint (same as used for collection)
+# Model checkpoint
 MODEL_CKPT="/root/logs/ppo/meta-rl-maze-dense-long-n1280meta-40gpu1/model.tar"
 
 # Base output directory
 BASE_OUT_DIR="/root/backup/kinematics/experiments"
 
 # =============================================================================
-# PKD CYCLE SAMPLER PARAMETERS (modify these for different runs)
+# PKD CYCLE SAMPLER PARAMETERS
 # =============================================================================
 
 NUM_H0=20               # Number of random h0 to sample per route
 WARMUP_PERIODS=8        # Periods to warmup
 SAMPLE_PERIODS=2        # Periods to check convergence
-AC_MATCH_THRESH=0.8     # Action consistency threshold
+AC_MATCH_THRESH=0.95     # Action consistency threshold
 SEED=42                 # Random seed for reproducibility
 
-# Length filtering (set to empty string "" for no limit / original behavior)
-MIN_LENGTH="3"           # Minimum sequence length (e.g., 5)
-MAX_LENGTH="15"           # Maximum sequence length (e.g., 15)
+# Length filtering
+MIN_LENGTH="3"           # Minimum sequence length
+MAX_LENGTH="15"          # Maximum sequence length
 
 # =============================================================================
 # CCA PARAMETERS
 # =============================================================================
 
 NUM_MODES=10            # Number of CCA modes to visualize
+FILTER_OUTLIERS="true"  # Enable outlier filtering for the alignment plot
 
 # =============================================================================
 # DERIVED PATHS
@@ -94,7 +94,6 @@ echo ""
 # Verify source routes exist
 if [ ! -f "${SOURCE_ROUTES}" ]; then
     echo "[ERROR] Source routes not found: ${SOURCE_ROUTES}"
-    echo "Please run the full pipeline first to collect routes."
     exit 1
 fi
 
@@ -158,17 +157,24 @@ echo "STEP 2: CCA Alignment Analysis"
 echo "============================================================"
 echo "Parameters:"
 echo "  num_modes=${NUM_MODES}"
+echo "  filter_outliers=${FILTER_OUTLIERS}"
 echo "Output directory: ${FIGURES_DIR}"
 echo "============================================================"
 echo ""
 
 CCA_START=$(date +%s)
 
+# Build CCA arguments
+CCA_ARGS="--num_modes=${NUM_MODES}"
+if [ "${FILTER_OUTLIERS}" = "true" ]; then
+    CCA_ARGS="${CCA_ARGS} --filter_outliers"
+fi
+
 python analysis/cca_alignment.py \
     --cycles_npz="${CYCLES_NPZ}" \
     --routes_npz="${SOURCE_ROUTES}" \
     --out_dir="${FIGURES_DIR}" \
-    --num_modes=${NUM_MODES}
+    ${CCA_ARGS}
 
 CCA_END=$(date +%s)
 CCA_TIME=$((CCA_END - CCA_START))
@@ -190,26 +196,11 @@ echo "============================================================"
 echo "Experiment: ${EXP_NAME}"
 echo "Finished: $(date)"
 echo ""
-echo "Parameters used:"
-echo "  num_h0:          ${NUM_H0}"
-echo "  ac_match_thresh: ${AC_MATCH_THRESH}"
-echo "  min_length:      ${MIN_LENGTH:-none}"
-echo "  max_length:      ${MAX_LENGTH:-none}"
-echo ""
 echo "Timing:"
 echo "  PKD Sampling:  ${PKD_TIME}s"
 echo "  CCA Analysis:  ${CCA_TIME}s"
 echo "  Total:         ${TOTAL_TIME}s"
 echo ""
 echo "Output directory: ${EXP_DIR}/"
-echo "  data/"
-echo "    └── routes.npz (symlink to source)"
-echo "    └── pkd_cycles.npz"
-echo "  figures/"
-echo "    └── cca_lollipop.png"
-echo "    └── figure5_alignment.png"
-echo "  logs/"
-echo "    └── pipeline.log"
 echo "============================================================"
-
 

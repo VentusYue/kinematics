@@ -126,12 +126,25 @@ def plot_alignment(U_means, V_means, colors, out_path, title="Alignment"):
     
     jitter_u = np.random.randn(n_points, 2) * jitter_scale_u
     jitter_v = np.random.randn(n_points, 2) * jitter_scale_v
+
+    # Determine colormap based on length range
+    if len(colors) > 0:
+        c_min, c_max = colors.min(), colors.max()
+        c_range = c_max - c_min
+        if c_max <= 20:
+            cmap = 'tab20'
+        elif c_range < 20:
+            cmap = 'jet'  # High contrast for small range at high offset
+        else:
+            cmap = 'turbo' # Better than viridis for distinguishing values
+    else:
+        cmap = 'viridis'
     
     # Left: Neural (U)
     sc1 = axes[0].scatter(
         U_means[:, 0] + jitter_u[:, 0], 
         U_means[:, 1] + jitter_u[:, 1], 
-        c=colors, cmap='viridis', alpha=0.7, s=50, edgecolors='black', linewidths=0.5
+        c=colors, cmap=cmap, alpha=0.7, s=50, edgecolors='black', linewidths=0.5
     )
     axes[0].set_title(f"Neural State (CM0 vs CM1) - {n_points} points")
     axes[0].set_xlabel("CM 0")
@@ -142,7 +155,7 @@ def plot_alignment(U_means, V_means, colors, out_path, title="Alignment"):
     sc2 = axes[1].scatter(
         V_means[:, 0] + jitter_v[:, 0], 
         V_means[:, 1] + jitter_v[:, 1], 
-        c=colors, cmap='viridis', alpha=0.7, s=50, edgecolors='black', linewidths=0.5
+        c=colors, cmap=cmap, alpha=0.7, s=50, edgecolors='black', linewidths=0.5
     )
     axes[1].set_title(f"Behavior Ridge (CM0 vs CM1) - {n_points} points")
     axes[1].set_xlabel("CM 0")
@@ -160,6 +173,7 @@ def main():
     parser.add_argument("--routes_npz", type=str, default=None) # Optional if integrated
     parser.add_argument("--out_dir", required=True)
     parser.add_argument("--num_modes", type=int, default=10)
+    parser.add_argument("--filter_outliers", action="store_true", help="Filter out extreme points in CM space")
     args = parser.parse_args()
     
     os.makedirs(args.out_dir, exist_ok=True)
@@ -240,6 +254,7 @@ def main():
     # Ridge embedding statistics
     ridge_vecs = []
     est_grid_steps = []
+    all_path_tiles = []  # Store all normalized path_tile data for visualization
     
     for i in range(num_cycles):
         h_cycle = cycles_hidden[i] # (L, H)
@@ -276,9 +291,16 @@ def main():
             
         path_tile = path_xy / est_grid_step
         
+        # Align first coordinate to origin (0, 0)
+        if len(path_tile) > 0:
+            path_tile = path_tile - path_tile[0]
+        
         # Compute ridge embedding
         ridge_vec = build_ridge_vector(path_tile) # (441,)
         ridge_vecs.append(ridge_vec)
+        
+        # Save path_tile for later visualization
+        all_path_tiles.append(path_tile.copy())
         
         # Hiddens
         L = h_cycle.shape[0]
@@ -377,10 +399,70 @@ def main():
         
     U_means = np.array(U_means)
     V_means = np.array(V_means)
+    cycle_lengths = np.array(cycle_lengths)
     
     print(f"  U_means shape: {U_means.shape}")
     print(f"  V_means shape: {V_means.shape}")
     
+    # Optional Filtering
+    if args.filter_outliers:
+        print("\n" + "-"*40)
+        print("FILTERING OUTLIERS")
+        print("-"*40)
+        
+        # Calculate robust statistics for U_means (Neural)
+        # We focus on CM0 and CM1 (first 2 columns)
+        u_cm0 = U_means[:, 0]
+        u_cm1 = U_means[:, 1]
+        
+        # Using IQR method
+        q1_0, q3_0 = np.percentile(u_cm0, [25, 75])
+        iqr_0 = q3_0 - q1_0
+        lower_0 = q1_0 - 1.5 * iqr_0
+        upper_0 = q3_0 + 1.5 * iqr_0
+        
+        q1_1, q3_1 = np.percentile(u_cm1, [25, 75])
+        iqr_1 = q3_1 - q1_1
+        lower_1 = q1_1 - 1.5 * iqr_1
+        upper_1 = q3_1 + 1.5 * iqr_1
+        
+        mask_0 = (u_cm0 >= lower_0) & (u_cm0 <= upper_0)
+        mask_1 = (u_cm1 >= lower_1) & (u_cm1 <= upper_1)
+        
+        # Repeat for V_means (Behavior)
+        v_cm0 = V_means[:, 0]
+        v_cm1 = V_means[:, 1]
+        
+        q1_v0, q3_v0 = np.percentile(v_cm0, [25, 75])
+        iqr_v0 = q3_v0 - q1_v0
+        lower_v0 = q1_v0 - 1.5 * iqr_v0
+        upper_v0 = q3_v0 + 1.5 * iqr_v0
+        
+        q1_v1, q3_v1 = np.percentile(v_cm1, [25, 75])
+        iqr_v1 = q3_v1 - q1_v1
+        lower_v1 = q1_v1 - 1.5 * iqr_v1
+        upper_v1 = q3_v1 + 1.5 * iqr_v1
+        
+        mask_v0 = (v_cm0 >= lower_v0) & (v_cm0 <= upper_v0)
+        mask_v1 = (v_cm1 >= lower_v1) & (v_cm1 <= upper_v1)
+        
+        # Combined mask
+        keep_mask = mask_0 & mask_1 & mask_v0 & mask_v1
+        
+        print(f"  Filtering stats (IQR method):")
+        print(f"    U_CM0: IQR={iqr_0:.2f}, Range=[{lower_0:.2f}, {upper_0:.2f}]")
+        print(f"    U_CM1: IQR={iqr_1:.2f}, Range=[{lower_1:.2f}, {upper_1:.2f}]")
+        print(f"    V_CM0: IQR={iqr_v0:.2f}, Range=[{lower_v0:.2f}, {upper_v0:.2f}]")
+        print(f"    V_CM1: IQR={iqr_v1:.2f}, Range=[{lower_v1:.2f}, {upper_v1:.2f}]")
+        
+        kept_count = keep_mask.sum()
+        total_count = len(keep_mask)
+        print(f"  Kept {kept_count}/{total_count} points ({kept_count/total_count*100:.1f}%)")
+        
+        U_means = U_means[keep_mask]
+        V_means = V_means[keep_mask]
+        cycle_lengths = cycle_lengths[keep_mask]
+
     # Check spread in canonical space
     u_spread = U_means[:, :2].std(axis=0)
     v_spread = V_means[:, :2].std(axis=0)
@@ -389,8 +471,119 @@ def main():
     
     # Plot Figure 5
     alignment_path = os.path.join(args.out_dir, "figure5_alignment.png")
-    plot_alignment(U_means, V_means, cycle_lengths, alignment_path)
+    plot_alignment(U_means, V_means, np.array(cycle_lengths), alignment_path)
     print(f"Saved alignment plot to {alignment_path}")
+    
+    # =========================================================================
+    # SAVE SAMPLE RIDGE IMAGES
+    # =========================================================================
+    print("\n" + "-"*40)
+    print("SAVING SAMPLE RIDGE IMAGES")
+    print("-"*40)
+    
+    # Randomly select 10 ridge images to visualize
+    num_samples = min(10, len(ridge_vecs))
+    if num_samples > 0:
+        # Use truly random seed based on current time for different samples each run
+        import time
+        np.random.seed(int(time.time() * 1000) % (2**32))
+        sample_indices = np.random.choice(len(ridge_vecs), size=num_samples, replace=False)
+        
+        print(f"  Randomly selected {num_samples} ridge images to save")
+        
+        for idx, sample_idx in enumerate(sample_indices):
+            ridge_vec = ridge_vecs[sample_idx]
+            # Reshape from 441-dim vector back to 21x21 image
+            ridge_img = ridge_vec.reshape(21, 21)
+            
+            # Create visualization
+            fig, ax = plt.subplots(figsize=(6, 6))
+            im = ax.imshow(ridge_img, cmap='hot', interpolation='nearest')
+            ax.set_title(f"Ridge Image {idx+1} (Cycle {sample_idx})")
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+            plt.colorbar(im, ax=ax, label='Ridge Value')
+            
+            # Save
+            ridge_img_path = os.path.join(args.out_dir, f"ridge_sample_{idx+1:02d}.png")
+            plt.savefig(ridge_img_path, dpi=150, bbox_inches='tight')
+            plt.close()
+        
+        print(f"  Saved {num_samples} ridge images to {args.out_dir}/ridge_sample_*.png")
+    
+    # =========================================================================
+    # PLOT ALL PATH_TILES OVERLAY (Center-aligned, exclude last point)
+    # =========================================================================
+    print("\n" + "-"*40)
+    print("PLOTTING ALL PATH TRAJECTORIES")
+    print("-"*40)
+    
+    if len(all_path_tiles) > 0:
+        from matplotlib.collections import LineCollection
+        
+        fig, ax = plt.subplots(figsize=(12, 12))
+        
+        print(f"  Plotting {len(all_path_tiles)} path trajectories (center-aligned, last point removed)")
+        
+        # Prepare line segments for LineCollection
+        line_segments = []
+        start_points_x = []
+        start_points_y = []
+        
+        for path in all_path_tiles:
+            if len(path) > 2:  # Need at least 3 points (to have 2+ after removing last)
+                # Remove the last point from each path
+                path_trimmed = path[:-1]
+                
+                # Add to line segments
+                line_segments.append(path_trimmed)
+                
+                # Collect start points (should all be at origin)
+                start_points_x.append(path_trimmed[0, 0])
+                start_points_y.append(path_trimmed[0, 1])
+        
+        # Use LineCollection to plot all paths at once
+        if line_segments:
+            lc = LineCollection(line_segments, colors='blue', linewidths=0.5, alpha=0.3)
+            ax.add_collection(lc)
+        
+        # Plot all start points together
+        if start_points_x:
+            ax.scatter(start_points_x, start_points_y, s=5, c='green', alpha=0.5, 
+                      marker='o', label='Start Points (at origin)', zorder=5)
+        
+        # Set equal aspect ratio (1:1)
+        ax.set_aspect('equal', adjustable='box')
+        
+        # Add grid
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.axhline(y=0, color='k', linestyle='-', linewidth=0.5, alpha=0.5)
+        ax.axvline(x=0, color='k', linestyle='-', linewidth=0.5, alpha=0.5)
+        
+        # Mark the center (0, 0) with a larger marker
+        ax.scatter([0], [0], s=100, c='black', marker='o', 
+                  label='Origin (All Paths Start Here)', zorder=10, 
+                  edgecolors='yellow', linewidths=2)
+        
+        # Auto-scale to fit all paths
+        ax.autoscale()
+        
+        ax.set_xlabel("X (Grid Units)")
+        ax.set_ylabel("Y (Grid Units)")
+        ax.set_title(f"All Path Trajectories Overlay (n={len(line_segments)}, Last Point Removed)")
+        ax.legend(loc='best', fontsize=10)
+        
+        plt.tight_layout()
+        
+        # Save
+        all_paths_overlay_path = os.path.join(args.out_dir, "all_paths_overlay.png")
+        plt.savefig(all_paths_overlay_path, dpi=200, bbox_inches='tight')
+        plt.close()
+        
+        print(f"  Saved all paths overlay to {all_paths_overlay_path}")
+        print(f"  Total paths plotted: {len(line_segments)} (last point removed from each)")
+        print(f"  All paths start from origin (0, 0)")
+        print(f"  Aspect ratio: 1:1 (equal)")
     
     # =========================================================================
     # SAVE DETAILED RESULTS

@@ -3,16 +3,51 @@
 # Meta-RL Behavior-Neural Alignment Pipeline (Analysis Only)
 # Skips collection, uses existing routes data
 # Runs: pkd_cycle_sampler -> cca_alignment
+# 
+# Usage:
+#   ./run_analysis_tuning_filtered.sh              # Run full pipeline
+#   ./run_analysis_tuning_filtered.sh --skip-pkd   # Skip PKD, use existing cycles
 # =============================================================================
 
 set -e  # Exit on error
+
+# =============================================================================
+# COMMAND-LINE ARGUMENTS PARSING
+# =============================================================================
+
+SKIP_PKD=false
+
+# Parse command-line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --skip-pkd)
+            SKIP_PKD=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --skip-pkd    Skip PKD Cycle Sampling (Step 1), use existing pkd_cycles.npz"
+            echo "  -h, --help    Show this help message"
+            echo ""
+            echo "Default: Run full pipeline (PKD + CCA)"
+            exit 0
+            ;;
+        *)
+            echo "[ERROR] Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
 # Experiment name for this analysis run
-EXP_NAME="run_easy_2e5_analysis_filter15_ac80_15"
+EXP_NAME="run_easy_2e5_analysis_filter15_ac95_20"
 
 # Source routes data (from a previous collection run)
 SOURCE_ROUTES="/root/backup/kinematics/experiments/run_easy_2e5/data/routes.npz"
@@ -42,6 +77,7 @@ MAX_LENGTH="15"           # Maximum sequence length (e.g., 15)
 # =============================================================================
 
 NUM_MODES=10            # Number of CCA modes to visualize
+FILTER_OUTLIERS="true"  # Set to "true" to filter outliers in alignment plot
 
 # =============================================================================
 # DERIVED PATHS
@@ -102,51 +138,76 @@ echo "[INFO] Using existing routes: ${SOURCE_ROUTES}"
 echo ""
 
 # =============================================================================
-# STEP 1: PKD Cycle Sampling
+# STEP 1: PKD Cycle Sampling (Conditional)
 # =============================================================================
 
-echo ""
-echo "============================================================"
-echo "STEP 1: PKD Cycle Sampling"
-echo "============================================================"
-echo "Parameters:"
-echo "  num_h0=${NUM_H0}"
-echo "  warmup_periods=${WARMUP_PERIODS}"
-echo "  sample_periods=${SAMPLE_PERIODS}"
-echo "  ac_match_thresh=${AC_MATCH_THRESH}"
-echo "  min_length=${MIN_LENGTH:-none}"
-echo "  max_length=${MAX_LENGTH:-none}"
-echo "============================================================"
-echo ""
+PKD_TIME=0
 
-PKD_START=$(date +%s)
+if [ "${SKIP_PKD}" = true ]; then
+    echo ""
+    echo "============================================================"
+    echo "STEP 1: PKD Cycle Sampling [SKIPPED]"
+    echo "============================================================"
+    echo "Using existing cycles file: ${CYCLES_NPZ}"
+    echo "============================================================"
+    echo ""
+    
+    # Verify that the cycles file exists
+    if [ ! -f "${CYCLES_NPZ}" ]; then
+        echo "[ERROR] Cycles file not found: ${CYCLES_NPZ}"
+        echo "Cannot skip PKD step without existing cycles file."
+        echo "Please either:"
+        echo "  1. Run without --skip-pkd to generate cycles, or"
+        echo "  2. Ensure the cycles file exists at the expected location"
+        exit 1
+    fi
+    
+    echo "[INFO] Found existing cycles: ${CYCLES_NPZ}"
+    echo ""
+else
+    echo ""
+    echo "============================================================"
+    echo "STEP 1: PKD Cycle Sampling"
+    echo "============================================================"
+    echo "Parameters:"
+    echo "  num_h0=${NUM_H0}"
+    echo "  warmup_periods=${WARMUP_PERIODS}"
+    echo "  sample_periods=${SAMPLE_PERIODS}"
+    echo "  ac_match_thresh=${AC_MATCH_THRESH}"
+    echo "  min_length=${MIN_LENGTH:-none}"
+    echo "  max_length=${MAX_LENGTH:-none}"
+    echo "============================================================"
+    echo ""
 
-# Build optional length filter arguments
-LENGTH_ARGS=""
-if [ -n "${MIN_LENGTH}" ]; then
-    LENGTH_ARGS="${LENGTH_ARGS} --min_length=${MIN_LENGTH}"
+    PKD_START=$(date +%s)
+
+    # Build optional length filter arguments
+    LENGTH_ARGS=""
+    if [ -n "${MIN_LENGTH}" ]; then
+        LENGTH_ARGS="${LENGTH_ARGS} --min_length=${MIN_LENGTH}"
+    fi
+    if [ -n "${MAX_LENGTH}" ]; then
+        LENGTH_ARGS="${LENGTH_ARGS} --max_length=${MAX_LENGTH}"
+    fi
+
+    python analysis/pkd_cycle_sampler.py \
+        --model_ckpt="${MODEL_CKPT}" \
+        --routes_npz="${SOURCE_ROUTES}" \
+        --out_npz="${CYCLES_NPZ}" \
+        --num_h0=${NUM_H0} \
+        --warmup_periods=${WARMUP_PERIODS} \
+        --sample_periods=${SAMPLE_PERIODS} \
+        --ac_match_thresh=${AC_MATCH_THRESH} \
+        --seed=${SEED} \
+        ${LENGTH_ARGS}
+
+    PKD_END=$(date +%s)
+    PKD_TIME=$((PKD_END - PKD_START))
+
+    echo ""
+    echo "[STEP 1 COMPLETE] PKD sampling took ${PKD_TIME} seconds"
+    echo ""
 fi
-if [ -n "${MAX_LENGTH}" ]; then
-    LENGTH_ARGS="${LENGTH_ARGS} --max_length=${MAX_LENGTH}"
-fi
-
-python analysis/pkd_cycle_sampler.py \
-    --model_ckpt="${MODEL_CKPT}" \
-    --routes_npz="${SOURCE_ROUTES}" \
-    --out_npz="${CYCLES_NPZ}" \
-    --num_h0=${NUM_H0} \
-    --warmup_periods=${WARMUP_PERIODS} \
-    --sample_periods=${SAMPLE_PERIODS} \
-    --ac_match_thresh=${AC_MATCH_THRESH} \
-    --seed=${SEED} \
-    ${LENGTH_ARGS}
-
-PKD_END=$(date +%s)
-PKD_TIME=$((PKD_END - PKD_START))
-
-echo ""
-echo "[STEP 1 COMPLETE] PKD sampling took ${PKD_TIME} seconds"
-echo ""
 
 # =============================================================================
 # STEP 2: CCA Alignment Analysis
@@ -164,11 +225,17 @@ echo ""
 
 CCA_START=$(date +%s)
 
+# Build CCA arguments
+CCA_ARGS="--num_modes=${NUM_MODES}"
+if [ "${FILTER_OUTLIERS}" = "true" ]; then
+    CCA_ARGS="${CCA_ARGS} --filter_outliers"
+fi
+
 python analysis/cca_alignment.py \
     --cycles_npz="${CYCLES_NPZ}" \
     --routes_npz="${SOURCE_ROUTES}" \
     --out_dir="${FIGURES_DIR}" \
-    --num_modes=${NUM_MODES}
+    ${CCA_ARGS}
 
 CCA_END=$(date +%s)
 CCA_TIME=$((CCA_END - CCA_START))
@@ -190,26 +257,44 @@ echo "============================================================"
 echo "Experiment: ${EXP_NAME}"
 echo "Finished: $(date)"
 echo ""
-echo "Parameters used:"
-echo "  num_h0:          ${NUM_H0}"
-echo "  ac_match_thresh: ${AC_MATCH_THRESH}"
-echo "  min_length:      ${MIN_LENGTH:-none}"
-echo "  max_length:      ${MAX_LENGTH:-none}"
+
+if [ "${SKIP_PKD}" = true ]; then
+    echo "Mode: CCA Analysis Only (PKD step skipped)"
+    echo ""
+    echo "Parameters used:"
+    echo "  num_modes:       ${NUM_MODES}"
+    echo "  filter_outliers: ${FILTER_OUTLIERS}"
+else
+    echo "Mode: Full Pipeline (PKD + CCA)"
+    echo ""
+    echo "Parameters used:"
+    echo "  num_h0:          ${NUM_H0}"
+    echo "  ac_match_thresh: ${AC_MATCH_THRESH}"
+    echo "  min_length:      ${MIN_LENGTH:-none}"
+    echo "  max_length:      ${MAX_LENGTH:-none}"
+fi
+
 echo ""
 echo "Timing:"
-echo "  PKD Sampling:  ${PKD_TIME}s"
+if [ "${SKIP_PKD}" = true ]; then
+    echo "  PKD Sampling:  skipped"
+else
+    echo "  PKD Sampling:  ${PKD_TIME}s"
+fi
 echo "  CCA Analysis:  ${CCA_TIME}s"
 echo "  Total:         ${TOTAL_TIME}s"
 echo ""
 echo "Output directory: ${EXP_DIR}/"
 echo "  data/"
 echo "    └── routes.npz (symlink to source)"
-echo "    └── pkd_cycles.npz"
+if [ "${SKIP_PKD}" = true ]; then
+    echo "    └── pkd_cycles.npz (existing, not regenerated)"
+else
+    echo "    └── pkd_cycles.npz"
+fi
 echo "  figures/"
 echo "    └── cca_lollipop.png"
 echo "    └── figure5_alignment.png"
 echo "  logs/"
 echo "    └── pipeline.log"
 echo "============================================================"
-
-
