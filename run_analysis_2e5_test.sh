@@ -1,15 +1,17 @@
 #!/bin/bash
 # =============================================================================
-# Meta-RL Behavior-Neural Alignment Analysis Pipeline
-# 
-# Takes routes from run_collect.sh and runs:
-#   Step 1: PKD Cycle Sampling
-#   Step 2: CCA Alignment Analysis
-#   Step 3: Trajectory Statistics
+# Meta-RL Behavior-Neural Alignment Analysis Pipeline (2e5 collection) - TEST
+#
+# Same as run_analysis_2e5.sh, but Step 2 runs:
+#   analysis/cca_alignment_test.py
 #
 # Usage:
-#   ./run_analysis.sh              # Run full pipeline
-#   ./run_analysis.sh --skip-pkd   # Skip PKD, use existing cycles
+#   bash run_analysis_2e5_test.sh
+#   bash run_analysis_2e5_test.sh --skip-pkd
+#
+# Optional env overrides:
+#   EXP_NAME=run_random_seeds_2e5_analysis_cca_ac80_test
+#   CCA_SCRIPT=analysis/cca_alignment_test.py
 # =============================================================================
 
 set -e  # Exit on error
@@ -42,46 +44,49 @@ while [[ $# -gt 0 ]]; do
 done
 
 # =============================================================================
-# CONFIGURATION - MODIFY THESE
+# CONFIGURATION - MODIFY THESE (or override via env vars)
 # =============================================================================
 
-# Source routes (from run_collect.sh output)
-SOURCE_ROUTES="/root/backup/kinematics/experiments/run_random_seeds_2k/data/routes.npz"
+# Source routes (from collection output)
+SOURCE_ROUTES="${SOURCE_ROUTES:-/root/backup/kinematics/experiments/run_random_seeds_2e5/data/routes.npz}"
 
 # Output experiment name
-EXP_NAME="run_random_seeds_2k_analysis_cca_v1"
+EXP_NAME="${EXP_NAME:-run_random_seeds_2e5_analysis_cca_ac80_test}"
 
 # Model checkpoint (same as collection)
-MODEL_CKPT="/root/logs/ppo/meta-rl-maze-dense-long-n1280meta-40gpu1/model.tar"
+MODEL_CKPT="${MODEL_CKPT:-/root/logs/ppo/meta-rl-maze-dense-long-n1280meta-40gpu1/model.tar}"
 
 # Base output directory
-BASE_OUT_DIR="/root/backup/kinematics/experiments"
+BASE_OUT_DIR="${BASE_OUT_DIR:-/root/backup/kinematics/experiments}"
 
 # Device
-DEVICE="cuda:0"
+DEVICE="${DEVICE:-cuda:0}"
+
+# CCA script
+CCA_SCRIPT="${CCA_SCRIPT:-analysis/cca_alignment_test.py}"
 
 # =============================================================================
 # PKD CYCLE SAMPLER PARAMETERS
 # =============================================================================
 
-NUM_H0=20               # Number of random h0 to sample per route
-WARMUP_PERIODS=8        # Periods to warmup
-SAMPLE_PERIODS=2        # Periods to check convergence
-AC_MATCH_THRESH=0.8     # Action consistency threshold (0.8 = 80% match)
-SEED=42                 # Random seed
+NUM_H0="${NUM_H0:-20}"               # Number of random h0 to sample per route
+WARMUP_PERIODS="${WARMUP_PERIODS:-8}"        # Periods to warmup
+SAMPLE_PERIODS="${SAMPLE_PERIODS:-2}"        # Periods to check convergence
+AC_MATCH_THRESH="${AC_MATCH_THRESH:-0.8}"     # Action consistency threshold (0.8 = 80% match)
+SEED="${SEED:-42}"                 # Random seed
 
 # Length filtering
-MIN_LENGTH="5"          # Minimum sequence length
-MAX_LENGTH="30"         # Maximum sequence length
+MIN_LENGTH="${MIN_LENGTH:-5}"          # Minimum sequence length
+MAX_LENGTH="${MAX_LENGTH:-30}"         # Maximum sequence length
 
 # =============================================================================
 # CCA PARAMETERS
 # =============================================================================
 
-NUM_MODES=10            # Number of CCA modes to visualize
-FILTER_OUTLIERS="true"  # Filter outliers in alignment plot
-PCA_DIM_X=50            # PCA dims for Neural state (X)
-PCA_DIM_Y=50            # PCA dims for Behavior Ridge (Y)
+NUM_MODES="${NUM_MODES:-10}"            # Number of CCA modes to visualize
+FILTER_OUTLIERS="${FILTER_OUTLIERS:-true}"  # Filter outliers in alignment plot
+PCA_DIM_X="${PCA_DIM_X:-50}"            # PCA dims for Neural state (X); 0 => full PCA up to rank
+PCA_DIM_Y="${PCA_DIM_Y:-50}"            # PCA dims for Behavior Ridge (Y); 0 => full PCA up to rank
 
 # =============================================================================
 # DERIVED PATHS
@@ -115,13 +120,14 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║         META-RL ALIGNMENT ANALYSIS PIPELINE                  ║"
+echo "║      META-RL ALIGNMENT ANALYSIS PIPELINE (TEST CCA)          ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Experiment:    ${EXP_NAME}"
 echo "Source routes: ${SOURCE_ROUTES}"
 echo "Model:         ${MODEL_CKPT}"
 echo "Device:        ${DEVICE}"
+echo "CCA script:    ${CCA_SCRIPT}"
 echo "Started:       $(date)"
 echo ""
 echo "Output: ${EXP_DIR}/"
@@ -133,7 +139,7 @@ echo ""
 # Verify source routes exist
 if [ ! -f "${SOURCE_ROUTES}" ]; then
     echo "[ERROR] Source routes not found: ${SOURCE_ROUTES}"
-    echo "Please run run_collect.sh first."
+    echo "Please run the collection first."
     exit 1
 fi
 
@@ -163,7 +169,7 @@ if [ "${SKIP_PKD}" = true ]; then
     echo "│ STEP 1: PKD Cycle Sampling [SKIPPED]                         │"
     echo "╰──────────────────────────────────────────────────────────────╯"
     echo ""
-    
+
     if [ ! -f "${CYCLES_NPZ}" ]; then
         echo "[ERROR] Cycles file not found: ${CYCLES_NPZ}"
         echo "Run without --skip-pkd first."
@@ -213,25 +219,27 @@ else
 fi
 
 # =============================================================================
-# STEP 2: CCA Alignment Analysis
+# STEP 2: CCA Alignment Analysis (TEST)
 # =============================================================================
 
 echo "╭──────────────────────────────────────────────────────────────╮"
-echo "│ STEP 2: CCA Alignment Analysis                               │"
+echo "│ STEP 2: CCA Alignment Analysis (TEST)                        │"
 echo "╰──────────────────────────────────────────────────────────────╯"
 echo ""
 echo "Parameters:"
 echo "  ├── num_modes:       ${NUM_MODES}"
-echo "  └── filter_outliers: ${FILTER_OUTLIERS}"
+echo "  ├── filter_outliers: ${FILTER_OUTLIERS}"
+echo "  ├── pca_dim_x:       ${PCA_DIM_X}"
+echo "  └── pca_dim_y:       ${PCA_DIM_Y}"
 echo ""
 
 CCA_START=$(date +%s)
 
-# Build CCA arguments
+# Build CCA arguments (keep interface consistent with original script)
 CCA_ARGS="--num_modes=${NUM_MODES} --pca_dim_x=${PCA_DIM_X} --pca_dim_y=${PCA_DIM_Y}"
 [ "${FILTER_OUTLIERS}" = "true" ] && CCA_ARGS="${CCA_ARGS} --filter_outliers"
 
-python -W ignore analysis/cca_alignment.py \
+python -W ignore "${CCA_SCRIPT}" \
     --cycles_npz="${CYCLES_NPZ}" \
     --routes_npz="${SOURCE_ROUTES}" \
     --out_dir="${FIGURES_DIR}" \
@@ -305,4 +313,5 @@ echo "  logs/"
 echo "    └── analysis.log"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
 

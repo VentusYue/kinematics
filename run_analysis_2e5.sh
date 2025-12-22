@@ -1,15 +1,15 @@
 #!/bin/bash
 # =============================================================================
-# Meta-RL Behavior-Neural Alignment Analysis Pipeline
-# 
-# Takes routes from run_collect.sh and runs:
+# Meta-RL Behavior-Neural Alignment Analysis Pipeline (2e5 collection)
+#
+# Runs:
 #   Step 1: PKD Cycle Sampling
 #   Step 2: CCA Alignment Analysis
 #   Step 3: Trajectory Statistics
 #
 # Usage:
-#   ./run_analysis.sh              # Run full pipeline
-#   ./run_analysis.sh --skip-pkd   # Skip PKD, use existing cycles
+#   ./run_analysis_2e5.sh              # Run full pipeline
+#   ./run_analysis_2e5.sh --skip-pkd   # Skip PKD, use existing cycles
 # =============================================================================
 
 set -e  # Exit on error
@@ -45,11 +45,11 @@ done
 # CONFIGURATION - MODIFY THESE
 # =============================================================================
 
-# Source routes (from run_collect.sh output)
-SOURCE_ROUTES="/root/backup/kinematics/experiments/run_random_seeds_2k/data/routes.npz"
+# Source routes (from collection output)
+SOURCE_ROUTES="/root/backup/kinematics/experiments/run_random_seeds_2e5/data/routes.npz"
 
 # Output experiment name
-EXP_NAME="run_random_seeds_2k_analysis_cca_v1"
+EXP_NAME="run_random_seeds_2e5_analysis_cca_ac80—v3"
 
 # Model checkpoint (same as collection)
 MODEL_CKPT="/root/logs/ppo/meta-rl-maze-dense-long-n1280meta-40gpu1/model.tar"
@@ -73,6 +73,8 @@ SEED=42                 # Random seed
 # Length filtering
 MIN_LENGTH="5"          # Minimum sequence length
 MAX_LENGTH="30"         # Maximum sequence length
+PCA_DIM_X=50            # PCA dims for Neural state (X)
+PCA_DIM_Y=50            # PCA dims for Behavior Ridge (Y)
 
 # =============================================================================
 # CCA PARAMETERS
@@ -80,8 +82,6 @@ MAX_LENGTH="30"         # Maximum sequence length
 
 NUM_MODES=10            # Number of CCA modes to visualize
 FILTER_OUTLIERS="true"  # Filter outliers in alignment plot
-PCA_DIM_X=50            # PCA dims for Neural state (X)
-PCA_DIM_Y=50            # PCA dims for Behavior Ridge (Y)
 
 # =============================================================================
 # DERIVED PATHS
@@ -133,7 +133,7 @@ echo ""
 # Verify source routes exist
 if [ ! -f "${SOURCE_ROUTES}" ]; then
     echo "[ERROR] Source routes not found: ${SOURCE_ROUTES}"
-    echo "Please run run_collect.sh first."
+    echo "Please run the collection first."
     exit 1
 fi
 
@@ -163,7 +163,7 @@ if [ "${SKIP_PKD}" = true ]; then
     echo "│ STEP 1: PKD Cycle Sampling [SKIPPED]                         │"
     echo "╰──────────────────────────────────────────────────────────────╯"
     echo ""
-    
+
     if [ ! -f "${CYCLES_NPZ}" ]; then
         echo "[ERROR] Cycles file not found: ${CYCLES_NPZ}"
         echo "Run without --skip-pkd first."
@@ -305,4 +305,5 @@ echo "  logs/"
 echo "    └── analysis.log"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
 

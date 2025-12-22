@@ -1,128 +1,14 @@
-# udpate for this version:
-'''
-1. select best cycle per route based on match_ratio
-2. cycle-level mean pooling
-3. ridge embedding fixed back to sqrt(2)*grid_size
-4. X: (Total_Steps, H), Y: ridge, T), change to X:(N_cycles, H), Y: (N_cycles, 441)
-'''
-
 
 import os
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.linalg import qr, svd, solve_triangular
+from scipy.linalg import qr, svd, inv
 import argparse
 import logging
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from analysis.ridge_embedding import build_ridge_vector
-
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-
-def plot_3d_interactive(U_means, V_means, metadata, out_path, title="3D Alignment"):
-    """
-    Create an interactive 3D scatter plot using Plotly.
-    U_means: (N, 3) - Neural top 3 modes
-    V_means: (N, 3) - Behavior top 3 modes
-    metadata: dict of arrays (N,) - e.g. {'Length': ..., 'Angle': ...}
-    """
-    # Create DataFrame for easier plotting? 
-    # Or just use graph_objects for flexibility
-    
-    n_points = U_means.shape[0]
-    
-    # Create subplots: 1 row, 2 columns, both 3D specs
-    fig = make_subplots(
-        rows=1, cols=2,
-        specs=[[{'type': 'scene'}, {'type': 'scene'}]],
-        subplot_titles=("Neural State (CM0-2)", "Behavior Ridge (CM0-2)")
-    )
-    
-    # We'll add traces for each metadata type, but that might be too heavy.
-    # Let's just pick the first metadata key as default color, 
-    # or create a hovertext that includes all metadata.
-    
-    hover_text = []
-    keys = list(metadata.keys())
-    for i in range(n_points):
-        text = f"Point {i}<br>"
-        for k in keys:
-            val = metadata[k][i]
-            if isinstance(val, (float, np.floating)):
-                text += f"{k}: {val:.2f}<br>"
-            else:
-                text += f"{k}: {val}<br>"
-        hover_text.append(text)
-        
-    # Color by the first key in metadata (usually Length or Angle)
-    color_key = keys[0] if keys else None
-    color_vals = metadata[color_key] if color_key else np.zeros(n_points)
-    
-    # Neural Trace
-    fig.add_trace(
-        go.Scatter3d(
-            x=U_means[:, 0],
-            y=U_means[:, 1],
-            z=U_means[:, 2],
-            mode='markers',
-            marker=dict(
-                size=3,
-                color=color_vals,
-                colorscale='Viridis',
-                opacity=0.8,
-                colorbar=dict(title=color_key, x=0.45)
-            ),
-            text=hover_text,
-            name='Neural'
-        ),
-        row=1, col=1
-    )
-    
-    # Behavior Trace
-    fig.add_trace(
-        go.Scatter3d(
-            x=V_means[:, 0],
-            y=V_means[:, 1],
-            z=V_means[:, 2],
-            mode='markers',
-            marker=dict(
-                size=3,
-                color=color_vals,
-                colorscale='Viridis',
-                opacity=0.8,
-                colorbar=dict(title=color_key, x=1.0)
-            ),
-            text=hover_text,
-            name='Behavior'
-        ),
-        row=1, col=2
-    )
-    
-    fig.update_layout(
-        title_text=title,
-        height=800,
-        width=1600,
-        showlegend=False
-    )
-    
-    # Update scene axes labels
-    scene_dict = dict(xaxis_title='CM0', yaxis_title='CM1', zaxis_title='CM2')
-    fig.update_scenes(scene_dict)
-    
-    fig.write_html(out_path)
-    print(f"Saved interactive 3D plot to {out_path}")
-
-def plot_alignment_multi(U_means, V_means, metadata, out_dir, prefix="fig5"):
-    """
-    Generate multiple static 2D alignment plots colored by different metadata features.
-    """
-    for key, values in metadata.items():
-        out_path = os.path.join(out_dir, f"{prefix}_by_{key.lower()}.png")
-        plot_alignment(U_means, V_means, values, out_path, title=f"Alignment colored by {key}")
-        print(f"Saved alignment plot colored by {key} to {out_path}")
 
 def _safe_colwise_corr(U: np.ndarray, V: np.ndarray) -> np.ndarray:
     """
@@ -150,19 +36,6 @@ def _standardize_fit(X0: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 def _standardize_apply(X0: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
     return (X0 - mean) / std
-
-
-def _zscore_cols(Z: np.ndarray, eps: float = 1e-8) -> np.ndarray:
-    """
-    Column-wise z-score with safe std floor.
-    Matches the plotting convention in the reference script: z-score U and V
-    before visualizing CM0/CM1.
-    """
-    Z = np.asarray(Z, dtype=np.float64)
-    mu = Z.mean(axis=0, keepdims=True)
-    sd = Z.std(axis=0, keepdims=True)
-    sd = np.where(sd < eps, 1.0, sd)
-    return (Z - mu) / sd
 
 
 def canoncorr(X0: np.ndarray, Y0: np.ndarray, fullReturn: bool = False) -> np.ndarray:
@@ -223,10 +96,8 @@ def canoncorr(X0: np.ndarray, Y0: np.ndarray, fullReturn: bool = False) -> np.nd
     L,D,M = svd(Q1.T @ Q2, full_matrices=True, check_finite=True, lapack_driver='gesdd')
     M = M.T
 
-    # Solve triangular systems (more stable than explicit matrix inverse)
-    # T11 and T22 are upper triangular from QR.
-    A = solve_triangular(T11, L[:, :d], lower=False) * np.sqrt(n - 1)
-    B = solve_triangular(T22, M[:, :d], lower=False) * np.sqrt(n - 1)
+    A = inv(T11) @ L[:, :d] * np.sqrt(n - 1)
+    B = inv(T22) @ M[:, :d] * np.sqrt(n - 1)
     r = D[:d]
     
     r = np.clip(r, 0, 1)
@@ -368,52 +239,6 @@ def plot_alignment(U_means, V_means, colors, out_path, title="Alignment"):
     plt.savefig(out_path, dpi=300)
     plt.close()
 
-def estimate_global_grid_step(paths: list[np.ndarray]) -> float:
-    """
-    Estimate the underlying grid step size from a collection of paths using a mode-like estimator
-    on axis-aligned steps. Robust to noise and diagonal moves.
-    """
-    if not paths:
-        return 1.0
-    
-    # Collect all step increments (absolute values of dx, dy)
-    all_steps = []
-    for p in paths:
-        if len(p) < 2:
-            continue
-        # Differences between consecutive points
-        diffs = np.abs(p[1:] - p[:-1])
-        # Flatten to 1D array of step components (dx, dy)
-        steps = diffs.flatten()
-        # Filter out near-zero steps (stationary) and keep significant movements
-        valid_steps = steps[steps > 1e-3]
-        if len(valid_steps) > 0:
-            all_steps.append(valid_steps)
-            
-    if not all_steps:
-        return 1.0
-        
-    all_steps_flat = np.concatenate(all_steps)
-    
-    if len(all_steps_flat) == 0:
-        return 1.0
-        
-    # Use histogram to find the mode (peak density)
-    # Assume grid step is likely between 0.1 and 10.0 (covering typical ranges)
-    # We use fine bins to capture the peak
-    q99 = np.percentile(all_steps_flat, 99)
-    bins = np.linspace(0, q99, 200)
-    hist, edges = np.histogram(all_steps_flat, bins=bins)
-    
-    peak_idx = np.argmax(hist)
-    mode_val = (edges[peak_idx] + edges[peak_idx+1]) / 2.0
-    
-    # If mode is very small (noise), fallback
-    if mode_val < 1e-3:
-        return 1.0
-        
-    return float(mode_val)
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cycles_npz", required=True)
@@ -425,19 +250,14 @@ def main():
                         help="What constitutes an observation for CCA. "
                              "'cycle' = one sample per PKD cycle (recommended for per-trajectory ridge vectors). "
                              "'step' = one sample per time-step (note: ridge is constant within a cycle, so this can inflate in-sample correlations).")
-    parser.add_argument("--x_agg", type=str, default="mean", choices=["mean", "first", "last"],
+    parser.add_argument("--x_agg", type=str, default="mean", choices=["mean", "last"],
                         help="How to aggregate hidden states into a per-cycle vector when --cca_level=cycle.")
-    parser.add_argument("--noise_eps", type=float, default=1e-3,
-                        help="Small uniform noise added to X/Y before PCA to break degenerate/constant columns (reference-style).")
-    parser.add_argument("--noise_seed", type=int, default=0, help="RNG seed for the small-noise injection.")
-    parser.add_argument("--drop_const_tol", type=float, default=1e-8,
-                        help="Drop features whose across-sample std <= this threshold (done before noise/PCA).")
     parser.add_argument("--test_frac", type=float, default=0.2,
                         help="Held-out fraction of cycles for reporting out-of-sample canonical correlations.")
     parser.add_argument("--pca_dim_x", type=int, default=50,
-                        help="[deprecated] Ignored. We always run full PCA (up to rank) to 'straighten' the point cloud.")
+                        help="If > 0, apply PCA to X (Neural) before CCA.")
     parser.add_argument("--pca_dim_y", type=int, default=50, 
-                        help="[deprecated] Ignored. We always run full PCA (up to rank) to 'straighten' the point cloud.")
+                        help="If > 0, apply PCA to Y (Ridge) before CCA.")
     parser.add_argument("--split_seed", type=int, default=0, help="Random seed for train/test split.")
     args = parser.parse_args()
     
@@ -503,130 +323,116 @@ def main():
             print(f"  [WARN] {low_var} routes have near-zero variance!")
     
     # =========================================================================
-    # SELECT BEST CYCLE PER ROUTE (One Cycle <-> One Behavior)
-    # =========================================================================
-    # Group by route_id and pick the one with highest match_ratio
-    
-    # Store indices of best cycles
-    best_indices = {}
-    for idx, r_id in enumerate(cycles_route_id):
-        ratio = cycles_match_ratio[idx]
-        if r_id not in best_indices:
-            best_indices[r_id] = idx
-        else:
-            # Update if better match
-            current_best_idx = best_indices[r_id]
-            if ratio > cycles_match_ratio[current_best_idx]:
-                best_indices[r_id] = idx
-    
-    selected_indices = sorted(list(best_indices.values()))
-    print(f"\n[Filtering] Selected {len(selected_indices)} best cycles from {num_cycles} total candidates (Unique Routes: {len(unique_routes)})")
-    
-    # =========================================================================
     # BUILD DATA MATRICES
     # =========================================================================
     print("\n" + "-"*40)
     print("BUILDING DATA MATRICES")
     print("-"*40)
     
-    # Reference-style: one observation per cycle.
-    if args.cca_level != "cycle":
-        print("  [warn] --cca_level=step is not recommended for ridge-per-cycle features; using cycle-level samples for CCA/plots.")
-
-    X_cycles: list[np.ndarray] = []
-    Y_cycles: list[np.ndarray] = []
-    cycle_lengths: list[float] = []
-    cycle_disps: list[float] = []
-    cycle_angles: list[float] = []
-
+    # We'll build per-cycle features first, then optionally expand to per-step.
+    X_cycle = []
+    Y_cycle = []
+    cycle_lengths = []
+    
     # Ridge embedding statistics
-    ridge_vecs: list[np.ndarray] = []
-    est_grid_steps: list[float] = []
-    all_path_tiles: list[np.ndarray] = []  # Store normalized path_tile for visualization
-
-    hidden_dim0 = int(hidden_dims[0])
-    skipped_nan = 0
-
-    for i in selected_indices:
-        h_cycle = cycles_hidden[i]  # (L, H)
-        r_id = int(cycles_route_id[i])
-
-        # Ensure shape (L, H)
+    ridge_vecs = []
+    est_grid_steps = []
+    all_path_tiles = []  # Store all normalized path_tile data for visualization
+    
+    for i in range(num_cycles):
+        h_cycle = cycles_hidden[i] # (L, H)
+        r_id = cycles_route_id[i]
+        
         if h_cycle.ndim == 1:
-            if h_cycle.shape[0] % hidden_dim0 == 0:
-                h_cycle = h_cycle.reshape(-1, hidden_dim0)
+             # Should be (L, H) but sometimes saved as flattened or squeezed?
+             # If H is 256
+             if h_cycle.shape[0] % 256 == 0:
+                 h_cycle = h_cycle.reshape(-1, 256)
+        
+        path_xy = routes_xy[r_id] # (T_route, 2)
 
-        if h_cycle.ndim != 2:
-            print(f"[WARN] Cycle {i}: unexpected h_cycle shape={getattr(h_cycle, 'shape', None)}; skipping.")
-            continue
-
-        path_xy = routes_xy[r_id]  # (T_route, 2)
-
-        if np.isnan(path_xy).any() or np.isnan(h_cycle).any():
-            skipped_nan += 1
-            print(f"[WARN] Cycle {i}: NaNs detected in path_xy or h_cycle; skipping.")
-            continue
-
-        # Match lengths conservatively (truncate to the shared prefix).
-        L = int(h_cycle.shape[0])
-        if path_xy.shape[0] != L:
-            print(f"[WARN] Cycle {i}: Length mismatch! path_xy={len(path_xy)}, h_cycle={L}; truncating to min length.")
-        L_use = int(min(L, path_xy.shape[0]))
-        if L_use <= 0:
-            print(f"[WARN] Cycle {i}: empty after truncation; skipping.")
-            continue
-        h_cycle = h_cycle[:L_use]
-        path_xy = path_xy[:L_use]
-
-        # Compute geometry features on the segment associated with the cycle
-        d_vec = path_xy[-1] - path_xy[0]
-        disp_val = float(np.linalg.norm(d_vec))
-        ang_val = float(np.arctan2(d_vec[1], d_vec[0]))
-
-        # Grid step normalization heuristic
+        # [CHECK 4] Assertions
+        if len(path_xy) != len(h_cycle):
+            print(f"[WARN] Cycle {i}: Length mismatch! path_xy={len(path_xy)}, h_cycle={len(h_cycle)}")
+            # Adjust path_xy to match h_cycle if possible (e.g. truncate or error)
+            # For now, we'll just warn and proceed, but this is a critical check.
+        
+        if np.isnan(path_xy).any():
+             print(f"[WARN] Cycle {i}: NaNs in path_xy!")
+        if np.isnan(h_cycle).any():
+             print(f"[WARN] Cycle {i}: NaNs in h_cycle!")
+        
+        # Grid Step Normalization Heuristic
+        # Procgen Maze grid step is usually around 24.0 or similar (depends on resolution).
+        # We can check the diffs.
         if len(path_xy) > 1:
             diffs = np.linalg.norm(path_xy[1:] - path_xy[:-1], axis=1)
+            # Filter zero diffs
             diffs = diffs[diffs > 0.1]
-            est_grid_step = float(np.median(diffs)) if len(diffs) > 0 else 1.0
+            if len(diffs) > 0:
+                est_grid_step = np.median(diffs)
+            else:
+                est_grid_step = 1.0
         else:
             est_grid_step = 1.0
-        est_grid_step = max(est_grid_step, 1e-3)
+        
         est_grid_steps.append(est_grid_step)
-
-        # Normalize to (approx) tile units and align first point to origin
-        path_tile = (path_xy / est_grid_step).astype(np.float32)
-        path_tile = path_tile - path_tile[0]
-
-        # Behavior embedding: ridge image flatten (441D)
-        ridge_vec = build_ridge_vector(path_tile)  # (441,)
+            
+        # Normalize
+        # Avoid division by zero
+        if est_grid_step < 1e-3:
+            est_grid_step = 1.0
+            
+        path_tile = path_xy / est_grid_step
+        
+        # Align first coordinate to origin (0, 0)
+        if len(path_tile) > 0:
+            path_tile = path_tile - path_tile[0]
+        
+        # Compute ridge embedding
+        ridge_vec = build_ridge_vector(path_tile) # (441,)
         ridge_vecs.append(ridge_vec)
+        
+        # Save path_tile for later visualization
         all_path_tiles.append(path_tile.copy())
-
-        # Neural embedding: choose one, like the original "ring center"
+        
+        # Build per-cycle X feature
         if args.x_agg == "mean":
-            x_i = h_cycle.mean(axis=0)
-        elif args.x_agg == "first":
-            x_i = h_cycle[0]
+            x_i = np.mean(h_cycle, axis=0)
         elif args.x_agg == "last":
             x_i = h_cycle[-1]
         else:
             raise ValueError(f"Unknown x_agg: {args.x_agg}")
 
-        X_cycles.append(np.asarray(x_i, dtype=np.float64))
-        Y_cycles.append(np.asarray(ridge_vec, dtype=np.float64))
-        cycle_lengths.append(float(routes_ep_len[r_id]))
-        cycle_disps.append(disp_val)
-        cycle_angles.append(ang_val)
+        X_cycle.append(x_i)
+        Y_cycle.append(ridge_vec)
+        cycle_lengths.append(routes_ep_len[r_id])
 
-    if skipped_nan > 0:
-        print(f"\n[WARN] Skipped cycles due to NaNs: {skipped_nan}/{num_cycles}")
+    X_cycle = np.asarray(X_cycle, dtype=np.float32)
+    Y_cycle = np.asarray(Y_cycle, dtype=np.float32)
+    cycle_lengths = np.asarray(cycle_lengths)
 
-    X = np.stack(X_cycles, axis=0).astype(np.float64)  # (N, H)
-    Y = np.stack(Y_cycles, axis=0).astype(np.float64)  # (N, 441)
-    cycle_lengths = np.asarray(cycle_lengths, dtype=np.float64)
-    cycle_disps = np.asarray(cycle_disps, dtype=np.float64)
-    cycle_angles = np.asarray(cycle_angles, dtype=np.float64)
-    sample_cycle_ids = np.arange(X.shape[0])
+    if args.cca_level == "cycle":
+        X = X_cycle
+        Y = Y_cycle
+        sample_cycle_ids = np.arange(num_cycles)
+    else:
+        # Per-step mode: expand cycle-level ridge to match time-steps, and keep time-step hiddens.
+        X_samples = []
+        Y_samples = []
+        sample_cycle_ids = []
+        for i in range(num_cycles):
+            h_cycle = cycles_hidden[i]
+            if h_cycle.ndim == 1:
+                if h_cycle.shape[0] % 256 == 0:
+                    h_cycle = h_cycle.reshape(-1, 256)
+            L = h_cycle.shape[0]
+            X_samples.append(h_cycle)
+            Y_samples.append(np.tile(Y_cycle[i], (L, 1)))
+            sample_cycle_ids.extend([i] * L)
+        X = np.concatenate(X_samples, axis=0).astype(np.float32)
+        Y = np.concatenate(Y_samples, axis=0).astype(np.float32)
+        sample_cycle_ids = np.asarray(sample_cycle_ids)
     
     print(f"\n[Matrix X (Neural)]")
     print(f"  Shape: {X.shape}")
@@ -642,66 +448,35 @@ def main():
     ridge_arr = np.array(ridge_vecs)
     ridge_normed = ridge_arr / (np.linalg.norm(ridge_arr, axis=1, keepdims=True) + 1e-8)
     cos_sim = ridge_normed @ ridge_normed.T
-    n_obs = int(ridge_normed.shape[0])
-    if n_obs >= 2:
-        cos_sim_off_diag = cos_sim[np.triu_indices(n_obs, k=1)]
-        print(f"\n[Ridge Embedding Diversity]")
-        print(f"  Pairwise cosine similarity: min={cos_sim_off_diag.min():.4f}, max={cos_sim_off_diag.max():.4f}, mean={cos_sim_off_diag.mean():.4f}")
-        if cos_sim_off_diag.mean() > 0.95:
-            print(f"  [WARN] Ridge embeddings are very similar (mean cos_sim > 0.95)!")
-            print(f"         This may limit CCA's ability to find meaningful correlations.")
-    else:
-        cos_sim_off_diag = np.array([], dtype=np.float64)
-        print("\n[Ridge Embedding Diversity]")
-        print("  Not enough observations to compute off-diagonal cosine similarity.")
-
+    cos_sim_off_diag = cos_sim[np.triu_indices(num_cycles, k=1)]
+    print(f"\n[Ridge Embedding Diversity]")
+    print(f"  Pairwise cosine similarity: min={cos_sim_off_diag.min():.4f}, max={cos_sim_off_diag.max():.4f}, mean={cos_sim_off_diag.mean():.4f}")
+    if cos_sim_off_diag.mean() > 0.95:
+        print(f"  [WARN] Ridge embeddings are very similar (mean cos_sim > 0.95)!")
+        print(f"         This may limit CCA's ability to find meaningful correlations.")
+    
     # =========================================================================
-    # PRE-PROCESSING (reference-style)
-    # - drop near-constant columns (before noise)
-    # - add a tiny noise (optional) to break degeneracies
-    # - full PCA per view (up to rank) to de-correlate / straighten point clouds
+    # OPTIONAL: PCA on X and Y
     # =========================================================================
     from sklearn.decomposition import PCA
+    
+    if args.pca_dim_x > 0 and args.pca_dim_x < X.shape[1]:
+        print("\n" + "-"*40)
+        print(f"PRE-PROCESSING: PCA on X (target dim={args.pca_dim_x})")
+        print("-"*40)
+        pca_x = PCA()
+        X = pca_x.fit_transform(X)
+        print(f"  X reduced shape: {X.shape}")
+        print(f"  Explained variance ratio sum: {pca_x.explained_variance_ratio_.sum():.4f}")
 
-    if X.shape[0] < 2:
-        print("[ERROR] Need at least 2 cycles to run CCA.")
-        return
-
-    # Keep a copy for held-out evaluation (we'll fit PCA on train only).
-    X_raw = X.copy()
-    Y_raw = Y.copy()
-
-    def _drop_near_const_cols(Z: np.ndarray, name: str, tol: float) -> tuple[np.ndarray, np.ndarray]:
-        std = Z.std(axis=0)
-        keep = std > tol
-        dropped = int((~keep).sum())
-        if dropped > 0:
-            print(f"  [pre] Dropping near-constant cols in {name}: {dropped}/{Z.shape[1]} (tol={tol:g})")
-        return Z[:, keep], keep
-
-    X, keep_x = _drop_near_const_cols(X_raw, "X", args.drop_const_tol)
-    Y, keep_y = _drop_near_const_cols(Y_raw, "Y", args.drop_const_tol)
-    print(f"  [pre] After drop const cols: X={X.shape}, Y={Y.shape}")
-
-    if args.noise_eps and args.noise_eps > 0:
-        rng_noise = np.random.default_rng(args.noise_seed)
-        eps = float(args.noise_eps)
-        X = X + rng_noise.uniform(-eps, eps, size=X.shape)
-        Y = Y + rng_noise.uniform(-eps, eps, size=Y.shape)
-        print(f"  [pre] Added uniform noise eps={eps:g} (seed={args.noise_seed})")
-
-    ncomp_x = int(min(X.shape[0] - 1, X.shape[1]))
-    ncomp_y = int(min(Y.shape[0] - 1, Y.shape[1]))
-    if ncomp_x < 1 or ncomp_y < 1:
-        print("[ERROR] Not enough rank after preprocessing for PCA/CCA.")
-        return
-
-    pca_x = PCA(n_components=ncomp_x, svd_solver="full")
-    pca_y = PCA(n_components=ncomp_y, svd_solver="full")
-    X = pca_x.fit_transform(X)
-    Y = pca_y.fit_transform(Y)
-    print(f"  [pre] Full PCA applied: X_pca={X.shape}, Y_pca={Y.shape}")
-    print(f"  [pre] Explained variance ratio sum: X={pca_x.explained_variance_ratio_.sum():.4f}, Y={pca_y.explained_variance_ratio_.sum():.4f}")
+    if args.pca_dim_y > 0 and args.pca_dim_y < Y.shape[1]:
+        print("\n" + "-"*40)
+        print(f"PRE-PROCESSING: PCA on Y (target dim={args.pca_dim_y})")
+        print("-"*40)
+        pca_y = PCA()
+        Y = pca_y.fit_transform(Y)
+        print(f"  Y reduced shape: {Y.shape}")
+        print(f"  Explained variance ratio sum: {pca_y.explained_variance_ratio_.sum():.4f}")
     
     # =========================================================================
     # RUN CCA
@@ -727,72 +502,48 @@ def main():
     test_idx = None
 
     if do_eval:
-        n_obs_raw = int(X_raw.shape[0])
-        if n_obs_raw < 3:
-            print("  [warn] Too few cycles for a meaningful train/test split; skipping held-out evaluation.")
+        rng = np.random.default_rng(args.split_seed)
+        perm = rng.permutation(num_cycles)
+        n_test = max(1, int(round(args.test_frac * num_cycles)))
+        test_cycles = perm[:n_test]
+        train_cycles = perm[n_test:]
+
+        # Map cycle split to sample indices (for step-level this expands).
+        if args.cca_level == "cycle":
+            train_idx = train_cycles
+            test_idx = test_cycles
         else:
-            rng = np.random.default_rng(args.split_seed)
-            perm = rng.permutation(n_obs_raw)
-            n_test = max(1, int(round(args.test_frac * n_obs_raw)))
-            test_idx = perm[:n_test]
-            train_idx = perm[n_test:]
+            train_mask = np.isin(sample_cycle_ids, train_cycles)
+            test_mask = np.isin(sample_cycle_ids, test_cycles)
+            train_idx = np.where(train_mask)[0]
+            test_idx = np.where(test_mask)[0]
 
-            X_tr0, Y_tr0 = X_raw[train_idx], Y_raw[train_idx]
-            X_te0, Y_te0 = X_raw[test_idx], Y_raw[test_idx]
+        X_tr, Y_tr = X[train_idx], Y[train_idx]
+        X_te, Y_te = X[test_idx], Y[test_idx]
 
-            # Drop near-constant columns based on train only, then apply the same mask to test.
-            vx = X_tr0.std(axis=0)
-            vy = Y_tr0.std(axis=0)
-            keep_x_tr = vx > args.drop_const_tol
-            keep_y_tr = vy > args.drop_const_tol
-            X_tr = X_tr0[:, keep_x_tr]
-            X_te = X_te0[:, keep_x_tr]
-            Y_tr = Y_tr0[:, keep_y_tr]
-            Y_te = Y_te0[:, keep_y_tr]
+        # Fit using train-set normalization, apply to train/test, and measure empirical corr.
+        xm, xs = _standardize_fit(X_tr)
+        ym, ys = _standardize_fit(Y_tr)
+        X_tr_z = _standardize_apply(X_tr, xm, xs)
+        Y_tr_z = _standardize_apply(Y_tr, ym, ys)
+        X_te_z = _standardize_apply(X_te, xm, xs)
+        Y_te_z = _standardize_apply(Y_te, ym, ys)
 
-            # Add tiny noise (same setting as full run) to stabilize degeneracies.
-            if args.noise_eps and args.noise_eps > 0:
-                rng_noise = np.random.default_rng(args.noise_seed)
-                eps = float(args.noise_eps)
-                X_tr = X_tr + rng_noise.uniform(-eps, eps, size=X_tr.shape)
-                X_te = X_te + rng_noise.uniform(-eps, eps, size=X_te.shape)
-                Y_tr = Y_tr + rng_noise.uniform(-eps, eps, size=Y_tr.shape)
-                Y_te = Y_te + rng_noise.uniform(-eps, eps, size=Y_te.shape)
+        # Fit CCA on train (using standardized data inside canoncorr is fine as long as we feed z-scored).
+        A_z, B_z, r_train, _, _ = canoncorr(X_tr_z, Y_tr_z, fullReturn=True)
+        U_tr = X_tr_z @ A_z
+        V_tr = Y_tr_z @ B_z
+        U_te = X_te_z @ A_z
+        V_te = Y_te_z @ B_z
+        r_train_emp = _safe_colwise_corr(U_tr, V_tr)
+        r_test = _safe_colwise_corr(U_te, V_te)
 
-            # Full PCA fitted on train only (avoid leakage).
-            ncomp_x_tr = int(min(X_tr.shape[0] - 1, X_tr.shape[1]))
-            ncomp_y_tr = int(min(Y_tr.shape[0] - 1, Y_tr.shape[1]))
-            if ncomp_x_tr < 1 or ncomp_y_tr < 1:
-                print("  [warn] Not enough rank in train split for PCA/CCA; skipping held-out evaluation.")
-            else:
-                pca_x_tr = PCA(n_components=ncomp_x_tr, svd_solver="full")
-                pca_y_tr = PCA(n_components=ncomp_y_tr, svd_solver="full")
-                X_tr_p = pca_x_tr.fit_transform(X_tr)
-                X_te_p = pca_x_tr.transform(X_te)
-                Y_tr_p = pca_y_tr.fit_transform(Y_tr)
-                Y_te_p = pca_y_tr.transform(Y_te)
+        # In rare cases, numerical issues can create |r|>1; clamp for display.
+        r_train_emp = np.clip(np.abs(r_train_emp), 0, 1)
+        r_test = np.clip(np.abs(r_test), 0, 1)
 
-                # Standardize by train stats before CCA + compute empirical held-out correlations.
-                xm, xs = _standardize_fit(X_tr_p)
-                ym, ys = _standardize_fit(Y_tr_p)
-                X_tr_z = _standardize_apply(X_tr_p, xm, xs)
-                Y_tr_z = _standardize_apply(Y_tr_p, ym, ys)
-                X_te_z = _standardize_apply(X_te_p, xm, xs)
-                Y_te_z = _standardize_apply(Y_te_p, ym, ys)
-
-                A_z, B_z, _, _, _ = canoncorr(X_tr_z, Y_tr_z, fullReturn=True)
-                U_tr = X_tr_z @ A_z
-                V_tr = Y_tr_z @ B_z
-                U_te = X_te_z @ A_z
-                V_te = Y_te_z @ B_z
-                r_train_emp = _safe_colwise_corr(U_tr, V_tr)
-                r_test = _safe_colwise_corr(U_te, V_te)
-
-                r_train_emp = np.clip(np.abs(r_train_emp), 0, 1)
-                r_test = np.clip(np.abs(r_test), 0, 1)
-
-                print(f"  Split by cycles: train={len(train_idx)}, test={len(test_idx)} (test_frac={args.test_frac})")
-                print(f"  Top {min(10, len(r_test))} held-out correlations: {r_test[:10]}")
+        print(f"  Split by cycles: train={len(train_cycles)}, test={len(test_cycles)} (test_frac={args.test_frac})")
+        print(f"  Top {min(10, len(r_test))} held-out correlations: {r_test[:10]}")
 
     try:
         A, B, r, U, V = canoncorr(X, Y, fullReturn=True)
@@ -830,18 +581,28 @@ def main():
         print(f"\nSaved lollipop plot to {lollipop_path}")
     
     # =========================================================================
-    # FIGURE 5 (reference-style): plot U[:,0:2] and V[:,0:2] directly
-    # - one point per cycle (already true)
-    # - z-score U and V columns before plotting for comparable axes
+    # AGGREGATE FOR FIGURE 5
     # =========================================================================
     print("\n" + "-"*40)
-    print("ALIGNMENT PLOT (DIRECT U/V, Z-SCORED)")
+    print("AGGREGATING FOR ALIGNMENT PLOT")
     print("-"*40)
     
-    U_plot = _zscore_cols(np.asarray(U, dtype=np.float64))
-    V_plot = _zscore_cols(np.asarray(V, dtype=np.float64))
-    print(f"  U shape: {U_plot.shape}")
-    print(f"  V shape: {V_plot.shape}")
+    # We want one point per cycle
+    if args.cca_level == "cycle":
+        U_means = np.asarray(U, dtype=np.float64)
+        V_means = np.asarray(V, dtype=np.float64)
+    else:
+        U_means = []
+        V_means = []
+        for i in range(num_cycles):
+            indices = np.where(sample_cycle_ids == i)[0]
+            U_means.append(np.mean(U[indices], axis=0))
+            V_means.append(np.mean(V[indices], axis=0))
+        U_means = np.asarray(U_means)
+        V_means = np.asarray(V_means)
+    
+    print(f"  U_means shape: {U_means.shape}")
+    print(f"  V_means shape: {V_means.shape}")
     
     # Optional Filtering
     if args.filter_outliers:
@@ -849,9 +610,10 @@ def main():
         print("FILTERING OUTLIERS")
         print("-"*40)
         
-        # Calculate robust statistics for U_plot (Neural) in (CM0, CM1)
-        u_cm0 = U_plot[:, 0]
-        u_cm1 = U_plot[:, 1]
+        # Calculate robust statistics for U_means (Neural)
+        # We focus on CM0 and CM1 (first 2 columns)
+        u_cm0 = U_means[:, 0]
+        u_cm1 = U_means[:, 1]
         
         # Using IQR method
         q1_0, q3_0 = np.percentile(u_cm0, [25, 75])
@@ -867,9 +629,9 @@ def main():
         mask_0 = (u_cm0 >= lower_0) & (u_cm0 <= upper_0)
         mask_1 = (u_cm1 >= lower_1) & (u_cm1 <= upper_1)
         
-        # Repeat for V_plot (Behavior)
-        v_cm0 = V_plot[:, 0]
-        v_cm1 = V_plot[:, 1]
+        # Repeat for V_means (Behavior)
+        v_cm0 = V_means[:, 0]
+        v_cm1 = V_means[:, 1]
         
         q1_v0, q3_v0 = np.percentile(v_cm0, [25, 75])
         iqr_v0 = q3_v0 - q1_v0
@@ -897,43 +659,20 @@ def main():
         total_count = len(keep_mask)
         print(f"  Kept {kept_count}/{total_count} points ({kept_count/total_count*100:.1f}%)")
         
-        U_plot = U_plot[keep_mask]
-        V_plot = V_plot[keep_mask]
+        U_means = U_means[keep_mask]
+        V_means = V_means[keep_mask]
         cycle_lengths = cycle_lengths[keep_mask]
-        cycle_disps = cycle_disps[keep_mask]
-        cycle_angles = cycle_angles[keep_mask]
 
     # Check spread in canonical space
-    u_spread = U_plot[:, :2].std(axis=0)
-    v_spread = V_plot[:, :2].std(axis=0)
+    u_spread = U_means[:, :2].std(axis=0)
+    v_spread = V_means[:, :2].std(axis=0)
     print(f"  U spread (CM0, CM1): {u_spread}")
     print(f"  V spread (CM0, CM1): {v_spread}")
     
-    # Plot Figure 5 and variants
-    metadata = {
-        'Length': cycle_lengths,
-        'Displacement': cycle_disps,
-        'Angle': cycle_angles
-    }
-    
-    # Original plot (Length)
-    # alignment_path = os.path.join(args.out_dir, "figure5_alignment.png")
-    # plot_alignment(U_plot, V_plot, np.array(cycle_lengths), alignment_path, title="Alignment (z-scored U/V)")
-    # print(f"Saved alignment plot to {alignment_path}")
-    
-    # Multi-feature plots
-    plot_alignment_multi(U_plot, V_plot, metadata, args.out_dir, prefix="fig5")
-    
-    # 3D Interactive Plot
-    if U_plot.shape[1] >= 3:
-        plot_3d_interactive(
-            U_plot[:, :3], 
-            V_plot[:, :3], 
-            metadata, 
-            os.path.join(args.out_dir, "alignment_3d.html")
-        )
-    else:
-        print(f"[WARN] Only {U_plot.shape[1]} modes available, skipping 3D plot.")
+    # Plot Figure 5
+    alignment_path = os.path.join(args.out_dir, "figure5_alignment.png")
+    plot_alignment(U_means, V_means, np.array(cycle_lengths), alignment_path)
+    print(f"Saved alignment plot to {alignment_path}")
     
     # =========================================================================
     # PLOT ALL PATH_TILES OVERLAY (Center-aligned, exclude last point)
@@ -1034,27 +773,16 @@ def main():
     # SAVE DETAILED RESULTS
     # =========================================================================
     results_path = os.path.join(args.out_dir, "cca_results.npz")
-    ridge_cos_mean = float(cos_sim_off_diag.mean()) if cos_sim_off_diag.size > 0 else float("nan")
-    num_cycles_used = int(len(cycle_lengths))
     np.savez_compressed(
         results_path,
         correlations_in_sample=r,
         correlations_train_empirical=r_train_emp if r_train_emp is not None else np.array([]),
         correlations_test_heldout=r_test if r_test is not None else np.array([]),
-        # For compatibility with older scripts, keep these keys.
-        # In this version, these are the *direct* canonical variates (one row per cycle),
-        # z-scored column-wise for plotting (reference-style).
-        U_means=U_plot,
-        V_means=V_plot,
-        # Also store raw U/V from canoncorr (on PCA-transformed data).
-        U=U,
-        V=V,
+        U_means=U_means,
+        V_means=V_means,
         cycle_lengths=np.array(cycle_lengths),
-        cycle_disps=np.array(cycle_disps),
-        cycle_angles=np.array(cycle_angles),
-        ridge_cosine_sim_mean=ridge_cos_mean,
-        num_cycles=num_cycles_used,
-        num_cycles_total=int(num_cycles),
+        ridge_cosine_sim_mean=float(cos_sim_off_diag.mean()),
+        num_cycles=num_cycles,
         cca_level=args.cca_level,
         x_agg=args.x_agg,
         test_frac=args.test_frac,

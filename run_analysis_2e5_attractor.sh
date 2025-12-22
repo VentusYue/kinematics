@@ -1,18 +1,41 @@
 #!/bin/bash
 # =============================================================================
-# Meta-RL Behavior-Neural Alignment Analysis Pipeline
-# 
-# Takes routes from run_collect.sh and runs:
-#   Step 1: PKD Cycle Sampling
-#   Step 2: CCA Alignment Analysis
-#   Step 3: Trajectory Statistics
+# Meta-RL Behavior-Neural Alignment Analysis Pipeline (2e5 collection) - ATTRACTOR
+#
+# - Step 1: PKD Cycle Sampling (optional)
+# - Step 2: CCA Alignment Analysis (Figure5-style attractor embedding)
+# - Step 3: Trajectory Statistics
 #
 # Usage:
-#   ./run_analysis.sh              # Run full pipeline
-#   ./run_analysis.sh --skip-pkd   # Skip PKD, use existing cycles
+#   bash run_analysis_2e5_attractor.sh              # Run full pipeline (PKD + CCA + stats)
+#   bash run_analysis_2e5_attractor.sh --skip-pkd   # Skip PKD, use existing pkd_cycles.npz
+#
+# Optional env overrides:
+#   SOURCE_ROUTES=/abs/path/to/routes.npz
+#   MODEL_CKPT=/abs/path/to/model.tar
+#   DEVICE=cuda:0
+#   EXP_NAME=run_random_seeds_2e5_analysis_attractor
+#   CCA_SCRIPT=analysis/cca_alignment_attractor.py
+#
+# Attractor CCA env overrides (Step 2):
+#   MIN_MATCH_RATIO=0.8
+#   DEDUP_BEHAVIOR=true
+#   BEHAVIOR_METRIC=cosine            # cosine|euclidean
+#   BEHAVIOR_MDS_DIM=16
+#   RIDGE_GRID_SIZE=21
+#   RIDGE_RADIUS_SCALES="0.9,1.414,2.0"
+#   RIDGE_AGGREGATES="max"            # max|sum or "max,sum"
+#   RIDGE_NORMALIZE_PATH=false
+#   NEURAL_EMBED=fourier              # mean|fourier
+#   NEURAL_PCA_DIM=16
+#   NEURAL_PCA_MAX_STATES=20000
+#   NEURAL_RESAMPLE_LEN=64
+#   NEURAL_FOURIER_HARMONICS=3
+#   NEURAL_FOURIER_MODE=sc            # sc|amp
+#   NUM_MODES=10
 # =============================================================================
 
-set -e  # Exit on error
+set -e
 
 # =============================================================================
 # COMMAND-LINE ARGUMENTS
@@ -32,6 +55,9 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --skip-pkd    Skip PKD Cycle Sampling, use existing pkd_cycles.npz"
             echo "  -h, --help    Show this help message"
+            echo ""
+            echo "Env overrides:"
+            echo "  SOURCE_ROUTES, MODEL_CKPT, DEVICE, EXP_NAME, CCA_SCRIPT"
             exit 0
             ;;
         *)
@@ -42,46 +68,52 @@ while [[ $# -gt 0 ]]; do
 done
 
 # =============================================================================
-# CONFIGURATION - MODIFY THESE
+# CONFIGURATION (defaults; override via env)
 # =============================================================================
 
-# Source routes (from run_collect.sh output)
-SOURCE_ROUTES="/root/backup/kinematics/experiments/run_random_seeds_2k/data/routes.npz"
-
-# Output experiment name
-EXP_NAME="run_random_seeds_2k_analysis_cca_v1"
-
-# Model checkpoint (same as collection)
-MODEL_CKPT="/root/logs/ppo/meta-rl-maze-dense-long-n1280meta-40gpu1/model.tar"
-
-# Base output directory
-BASE_OUT_DIR="/root/backup/kinematics/experiments"
-
-# Device
-DEVICE="cuda:0"
+SOURCE_ROUTES="${SOURCE_ROUTES:-/root/backup/kinematics/experiments/run_random_seeds_2e5/data/routes.npz}"
+EXP_NAME="${EXP_NAME:-run_random_seeds_2e5_analysis_cca_ac80_attractor}"
+MODEL_CKPT="${MODEL_CKPT:-/root/logs/ppo/meta-rl-maze-dense-long-n1280meta-40gpu1/model.tar}"
+BASE_OUT_DIR="${BASE_OUT_DIR:-/root/backup/kinematics/experiments}"
+DEVICE="${DEVICE:-cuda:0}"
+CCA_SCRIPT="${CCA_SCRIPT:-analysis/cca_alignment_attractor.py}"
 
 # =============================================================================
-# PKD CYCLE SAMPLER PARAMETERS
+# PKD CYCLE SAMPLER PARAMETERS (same defaults as run_analysis_2e5_debug.sh)
 # =============================================================================
 
-NUM_H0=20               # Number of random h0 to sample per route
-WARMUP_PERIODS=8        # Periods to warmup
-SAMPLE_PERIODS=2        # Periods to check convergence
-AC_MATCH_THRESH=0.8     # Action consistency threshold (0.8 = 80% match)
-SEED=42                 # Random seed
+NUM_H0="${NUM_H0:-20}"
+WARMUP_PERIODS="${WARMUP_PERIODS:-8}"
+SAMPLE_PERIODS="${SAMPLE_PERIODS:-2}"
+AC_MATCH_THRESH="${AC_MATCH_THRESH:-0.8}"
+SEED="${SEED:-42}"
 
 # Length filtering
-MIN_LENGTH="5"          # Minimum sequence length
-MAX_LENGTH="30"         # Maximum sequence length
+MIN_LENGTH="${MIN_LENGTH:-5}"
+MAX_LENGTH="${MAX_LENGTH:-30}"
 
 # =============================================================================
-# CCA PARAMETERS
+# CCA (ATTRACTOR) PARAMETERS
 # =============================================================================
 
-NUM_MODES=10            # Number of CCA modes to visualize
-FILTER_OUTLIERS="true"  # Filter outliers in alignment plot
-PCA_DIM_X=50            # PCA dims for Neural state (X)
-PCA_DIM_Y=50            # PCA dims for Behavior Ridge (Y)
+MIN_MATCH_RATIO="${MIN_MATCH_RATIO:-0.8}"
+DEDUP_BEHAVIOR="${DEDUP_BEHAVIOR:-true}"
+BEHAVIOR_METRIC="${BEHAVIOR_METRIC:-cosine}"
+BEHAVIOR_MDS_DIM="${BEHAVIOR_MDS_DIM:-16}"
+
+RIDGE_GRID_SIZE="${RIDGE_GRID_SIZE:-21}"
+RIDGE_RADIUS_SCALES="${RIDGE_RADIUS_SCALES:-0.9,1.414,2.0}"
+RIDGE_AGGREGATES="${RIDGE_AGGREGATES:-max}"
+RIDGE_NORMALIZE_PATH="${RIDGE_NORMALIZE_PATH:-false}"
+
+NEURAL_EMBED="${NEURAL_EMBED:-fourier}"
+NEURAL_PCA_DIM="${NEURAL_PCA_DIM:-16}"
+NEURAL_PCA_MAX_STATES="${NEURAL_PCA_MAX_STATES:-20000}"
+NEURAL_RESAMPLE_LEN="${NEURAL_RESAMPLE_LEN:-64}"
+NEURAL_FOURIER_HARMONICS="${NEURAL_FOURIER_HARMONICS:-3}"
+NEURAL_FOURIER_MODE="${NEURAL_FOURIER_MODE:-sc}"
+
+NUM_MODES="${NUM_MODES:-10}"
 
 # =============================================================================
 # DERIVED PATHS
@@ -89,11 +121,12 @@ PCA_DIM_Y=50            # PCA dims for Behavior Ridge (Y)
 
 EXP_DIR="${BASE_OUT_DIR}/${EXP_NAME}"
 DATA_DIR="${EXP_DIR}/data"
-FIGURES_DIR="${EXP_DIR}/figures"
+# Keep attractor figures separate by default to preserve baseline outputs
+FIGURES_DIR="${FIGURES_DIR:-${EXP_DIR}/figures_attractor}"
 LOGS_DIR="${EXP_DIR}/logs"
 
 CYCLES_NPZ="${DATA_DIR}/pkd_cycles.npz"
-LOG_FILE="${LOGS_DIR}/analysis.log"
+LOG_FILE="${LOGS_DIR}/analysis_attractor.log"
 
 # =============================================================================
 # ENVIRONMENT SETUP
@@ -105,7 +138,7 @@ cd /root/backup/kinematics
 
 mkdir -p "${DATA_DIR}" "${FIGURES_DIR}" "${LOGS_DIR}"
 
-# Link source routes
+# Link source routes into experiment dir
 if [ ! -f "${DATA_DIR}/routes.npz" ]; then
     ln -s "${SOURCE_ROUTES}" "${DATA_DIR}/routes.npz" 2>/dev/null || cp "${SOURCE_ROUTES}" "${DATA_DIR}/routes.npz"
 fi
@@ -115,29 +148,29 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║         META-RL ALIGNMENT ANALYSIS PIPELINE                  ║"
+echo "║       META-RL ALIGNMENT ANALYSIS PIPELINE (ATTRACTOR)        ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Experiment:    ${EXP_NAME}"
 echo "Source routes: ${SOURCE_ROUTES}"
 echo "Model:         ${MODEL_CKPT}"
 echo "Device:        ${DEVICE}"
+echo "CCA script:    ${CCA_SCRIPT}"
 echo "Started:       $(date)"
 echo ""
 echo "Output: ${EXP_DIR}/"
-echo "  ├── data/     - cycles and routes"
-echo "  ├── figures/  - CCA plots"
-echo "  └── logs/     - pipeline log"
+echo "  ├── data/             - cycles and routes"
+echo "  ├── figures_attractor/ - attractor-style Fig5 plots"
+echo "  └── logs/             - pipeline log"
 echo ""
 
 # Verify source routes exist
 if [ ! -f "${SOURCE_ROUTES}" ]; then
     echo "[ERROR] Source routes not found: ${SOURCE_ROUTES}"
-    echo "Please run run_collect.sh first."
+    echo "Please run the collection first."
     exit 1
 fi
 
-# Show source routes info
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "Source Routes Info:"
 python -W ignore -c "
@@ -153,7 +186,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 
 # =============================================================================
-# STEP 1: PKD Cycle Sampling
+# STEP 1: PKD CYCLE SAMPLING
 # =============================================================================
 
 PKD_TIME=0
@@ -163,10 +196,10 @@ if [ "${SKIP_PKD}" = true ]; then
     echo "│ STEP 1: PKD Cycle Sampling [SKIPPED]                         │"
     echo "╰──────────────────────────────────────────────────────────────╯"
     echo ""
-    
+
     if [ ! -f "${CYCLES_NPZ}" ]; then
         echo "[ERROR] Cycles file not found: ${CYCLES_NPZ}"
-        echo "Run without --skip-pkd first."
+        echo "Run without --skip-pkd first, or point EXP_NAME to an experiment that already has pkd_cycles.npz."
         exit 1
     fi
     echo "[INFO] Using existing: ${CYCLES_NPZ}"
@@ -187,7 +220,6 @@ else
 
     PKD_START=$(date +%s)
 
-    # Build length filter arguments
     LENGTH_ARGS=""
     [ -n "${MIN_LENGTH}" ] && LENGTH_ARGS="${LENGTH_ARGS} --min_length=${MIN_LENGTH}"
     [ -n "${MAX_LENGTH}" ] && LENGTH_ARGS="${LENGTH_ARGS} --max_length=${MAX_LENGTH}"
@@ -213,25 +245,59 @@ else
 fi
 
 # =============================================================================
-# STEP 2: CCA Alignment Analysis
+# STEP 2: CCA ALIGNMENT ANALYSIS (ATTRACTOR SCRIPT)
 # =============================================================================
 
 echo "╭──────────────────────────────────────────────────────────────╮"
-echo "│ STEP 2: CCA Alignment Analysis                               │"
+echo "│ STEP 2: CCA Alignment Analysis (ATTRACTOR / Fig5-style)      │"
 echo "╰──────────────────────────────────────────────────────────────╯"
 echo ""
-echo "Parameters:"
-echo "  ├── num_modes:       ${NUM_MODES}"
-echo "  └── filter_outliers: ${FILTER_OUTLIERS}"
+echo "Attractor CCA parameters:"
+echo "  ├── min_match_ratio:        ${MIN_MATCH_RATIO}"
+echo "  ├── dedup_behavior:         ${DEDUP_BEHAVIOR}"
+echo "  ├── behavior_metric:        ${BEHAVIOR_METRIC}"
+echo "  ├── behavior_mds_dim:       ${BEHAVIOR_MDS_DIM}"
+echo "  ├── ridge_grid_size:        ${RIDGE_GRID_SIZE}"
+echo "  ├── ridge_radius_scales:    ${RIDGE_RADIUS_SCALES}"
+echo "  ├── ridge_aggregates:       ${RIDGE_AGGREGATES}"
+echo "  ├── ridge_normalize_path:   ${RIDGE_NORMALIZE_PATH}"
+echo "  ├── neural_embed:           ${NEURAL_EMBED}"
+echo "  ├── neural_pca_dim:         ${NEURAL_PCA_DIM}"
+echo "  ├── neural_pca_max_states:  ${NEURAL_PCA_MAX_STATES}"
+echo "  ├── neural_resample_len:    ${NEURAL_RESAMPLE_LEN}"
+echo "  ├── neural_fourier_harmonics:${NEURAL_FOURIER_HARMONICS}"
+echo "  ├── neural_fourier_mode:    ${NEURAL_FOURIER_MODE}"
+echo "  └── num_modes:              ${NUM_MODES}"
 echo ""
 
 CCA_START=$(date +%s)
 
-# Build CCA arguments
-CCA_ARGS="--num_modes=${NUM_MODES} --pca_dim_x=${PCA_DIM_X} --pca_dim_y=${PCA_DIM_Y}"
-[ "${FILTER_OUTLIERS}" = "true" ] && CCA_ARGS="${CCA_ARGS} --filter_outliers"
+CCA_ARGS="--num_modes=${NUM_MODES}"
+CCA_ARGS="${CCA_ARGS} --min_match_ratio=${MIN_MATCH_RATIO}"
+CCA_ARGS="${CCA_ARGS} --behavior_metric=${BEHAVIOR_METRIC} --behavior_mds_dim=${BEHAVIOR_MDS_DIM}"
+CCA_ARGS="${CCA_ARGS} --ridge_grid_size=${RIDGE_GRID_SIZE}"
+CCA_ARGS="${CCA_ARGS} --ridge_radius_scales=${RIDGE_RADIUS_SCALES}"
+CCA_ARGS="${CCA_ARGS} --ridge_aggregates=${RIDGE_AGGREGATES}"
+CCA_ARGS="${CCA_ARGS} --neural_embed=${NEURAL_EMBED}"
+CCA_ARGS="${CCA_ARGS} --neural_pca_dim=${NEURAL_PCA_DIM}"
+CCA_ARGS="${CCA_ARGS} --neural_pca_max_states=${NEURAL_PCA_MAX_STATES}"
+CCA_ARGS="${CCA_ARGS} --neural_resample_len=${NEURAL_RESAMPLE_LEN}"
+CCA_ARGS="${CCA_ARGS} --neural_fourier_harmonics=${NEURAL_FOURIER_HARMONICS}"
+CCA_ARGS="${CCA_ARGS} --neural_fourier_mode=${NEURAL_FOURIER_MODE}"
 
-python -W ignore analysis/cca_alignment.py \
+if [ "${DEDUP_BEHAVIOR}" = "true" ]; then
+    CCA_ARGS="${CCA_ARGS} --dedup_behavior"
+else
+    CCA_ARGS="${CCA_ARGS} --no-dedup_behavior"
+fi
+
+if [ "${RIDGE_NORMALIZE_PATH}" = "true" ]; then
+    CCA_ARGS="${CCA_ARGS} --ridge_normalize_path"
+else
+    CCA_ARGS="${CCA_ARGS} --no-ridge_normalize_path"
+fi
+
+python -W ignore "${CCA_SCRIPT}" \
     --cycles_npz="${CYCLES_NPZ}" \
     --routes_npz="${SOURCE_ROUTES}" \
     --out_dir="${FIGURES_DIR}" \
@@ -245,7 +311,7 @@ echo "[STEP 2 COMPLETE] CCA analysis: ${CCA_TIME}s"
 echo ""
 
 # =============================================================================
-# STEP 3: Trajectory Statistics
+# STEP 3: TRAJECTORY STATISTICS
 # =============================================================================
 
 echo "╭──────────────────────────────────────────────────────────────╮"
@@ -291,18 +357,14 @@ echo "  Statistics:    ${STATS_TIME}s"
 echo "  Total:         ${TOTAL_TIME}s"
 echo ""
 echo "Output: ${EXP_DIR}/"
-echo "  data/"
-echo "    ├── routes.npz (symlink)"
-echo "    └── pkd_cycles.npz"
-echo "  figures/"
+echo "  figures_attractor/"
 echo "    ├── cca_lollipop.png"
 echo "    ├── figure5_alignment.png"
-echo "    ├── length_distribution.png"
-echo "    ├── xy_trajectories.png"
-echo "    ├── seed_coverage.png"
-echo "    └── action_distribution.png"
+echo "    ├── cca_results_attractor.npz"
+echo "    └── ... (more)"
 echo "  logs/"
-echo "    └── analysis.log"
+echo "    └── analysis_attractor.log"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
 

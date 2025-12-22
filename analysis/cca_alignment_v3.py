@@ -18,112 +18,6 @@ import logging
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from analysis.ridge_embedding import build_ridge_vector
 
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-
-def plot_3d_interactive(U_means, V_means, metadata, out_path, title="3D Alignment"):
-    """
-    Create an interactive 3D scatter plot using Plotly.
-    U_means: (N, 3) - Neural top 3 modes
-    V_means: (N, 3) - Behavior top 3 modes
-    metadata: dict of arrays (N,) - e.g. {'Length': ..., 'Angle': ...}
-    """
-    # Create DataFrame for easier plotting? 
-    # Or just use graph_objects for flexibility
-    
-    n_points = U_means.shape[0]
-    
-    # Create subplots: 1 row, 2 columns, both 3D specs
-    fig = make_subplots(
-        rows=1, cols=2,
-        specs=[[{'type': 'scene'}, {'type': 'scene'}]],
-        subplot_titles=("Neural State (CM0-2)", "Behavior Ridge (CM0-2)")
-    )
-    
-    # We'll add traces for each metadata type, but that might be too heavy.
-    # Let's just pick the first metadata key as default color, 
-    # or create a hovertext that includes all metadata.
-    
-    hover_text = []
-    keys = list(metadata.keys())
-    for i in range(n_points):
-        text = f"Point {i}<br>"
-        for k in keys:
-            val = metadata[k][i]
-            if isinstance(val, (float, np.floating)):
-                text += f"{k}: {val:.2f}<br>"
-            else:
-                text += f"{k}: {val}<br>"
-        hover_text.append(text)
-        
-    # Color by the first key in metadata (usually Length or Angle)
-    color_key = keys[0] if keys else None
-    color_vals = metadata[color_key] if color_key else np.zeros(n_points)
-    
-    # Neural Trace
-    fig.add_trace(
-        go.Scatter3d(
-            x=U_means[:, 0],
-            y=U_means[:, 1],
-            z=U_means[:, 2],
-            mode='markers',
-            marker=dict(
-                size=3,
-                color=color_vals,
-                colorscale='Viridis',
-                opacity=0.8,
-                colorbar=dict(title=color_key, x=0.45)
-            ),
-            text=hover_text,
-            name='Neural'
-        ),
-        row=1, col=1
-    )
-    
-    # Behavior Trace
-    fig.add_trace(
-        go.Scatter3d(
-            x=V_means[:, 0],
-            y=V_means[:, 1],
-            z=V_means[:, 2],
-            mode='markers',
-            marker=dict(
-                size=3,
-                color=color_vals,
-                colorscale='Viridis',
-                opacity=0.8,
-                colorbar=dict(title=color_key, x=1.0)
-            ),
-            text=hover_text,
-            name='Behavior'
-        ),
-        row=1, col=2
-    )
-    
-    fig.update_layout(
-        title_text=title,
-        height=800,
-        width=1600,
-        showlegend=False
-    )
-    
-    # Update scene axes labels
-    scene_dict = dict(xaxis_title='CM0', yaxis_title='CM1', zaxis_title='CM2')
-    fig.update_scenes(scene_dict)
-    
-    fig.write_html(out_path)
-    print(f"Saved interactive 3D plot to {out_path}")
-
-def plot_alignment_multi(U_means, V_means, metadata, out_dir, prefix="fig5"):
-    """
-    Generate multiple static 2D alignment plots colored by different metadata features.
-    """
-    for key, values in metadata.items():
-        out_path = os.path.join(out_dir, f"{prefix}_by_{key.lower()}.png")
-        plot_alignment(U_means, V_means, values, out_path, title=f"Alignment colored by {key}")
-        print(f"Saved alignment plot colored by {key} to {out_path}")
-
 def _safe_colwise_corr(U: np.ndarray, V: np.ndarray) -> np.ndarray:
     """
     Compute Pearson correlation for each corresponding column in U and V.
@@ -368,52 +262,6 @@ def plot_alignment(U_means, V_means, colors, out_path, title="Alignment"):
     plt.savefig(out_path, dpi=300)
     plt.close()
 
-def estimate_global_grid_step(paths: list[np.ndarray]) -> float:
-    """
-    Estimate the underlying grid step size from a collection of paths using a mode-like estimator
-    on axis-aligned steps. Robust to noise and diagonal moves.
-    """
-    if not paths:
-        return 1.0
-    
-    # Collect all step increments (absolute values of dx, dy)
-    all_steps = []
-    for p in paths:
-        if len(p) < 2:
-            continue
-        # Differences between consecutive points
-        diffs = np.abs(p[1:] - p[:-1])
-        # Flatten to 1D array of step components (dx, dy)
-        steps = diffs.flatten()
-        # Filter out near-zero steps (stationary) and keep significant movements
-        valid_steps = steps[steps > 1e-3]
-        if len(valid_steps) > 0:
-            all_steps.append(valid_steps)
-            
-    if not all_steps:
-        return 1.0
-        
-    all_steps_flat = np.concatenate(all_steps)
-    
-    if len(all_steps_flat) == 0:
-        return 1.0
-        
-    # Use histogram to find the mode (peak density)
-    # Assume grid step is likely between 0.1 and 10.0 (covering typical ranges)
-    # We use fine bins to capture the peak
-    q99 = np.percentile(all_steps_flat, 99)
-    bins = np.linspace(0, q99, 200)
-    hist, edges = np.histogram(all_steps_flat, bins=bins)
-    
-    peak_idx = np.argmax(hist)
-    mode_val = (edges[peak_idx] + edges[peak_idx+1]) / 2.0
-    
-    # If mode is very small (noise), fallback
-    if mode_val < 1e-3:
-        return 1.0
-        
-    return float(mode_val)
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cycles_npz", required=True)
@@ -536,8 +384,6 @@ def main():
     X_cycles: list[np.ndarray] = []
     Y_cycles: list[np.ndarray] = []
     cycle_lengths: list[float] = []
-    cycle_disps: list[float] = []
-    cycle_angles: list[float] = []
 
     # Ridge embedding statistics
     ridge_vecs: list[np.ndarray] = []
@@ -578,11 +424,6 @@ def main():
         h_cycle = h_cycle[:L_use]
         path_xy = path_xy[:L_use]
 
-        # Compute geometry features on the segment associated with the cycle
-        d_vec = path_xy[-1] - path_xy[0]
-        disp_val = float(np.linalg.norm(d_vec))
-        ang_val = float(np.arctan2(d_vec[1], d_vec[0]))
-
         # Grid step normalization heuristic
         if len(path_xy) > 1:
             diffs = np.linalg.norm(path_xy[1:] - path_xy[:-1], axis=1)
@@ -615,8 +456,6 @@ def main():
         X_cycles.append(np.asarray(x_i, dtype=np.float64))
         Y_cycles.append(np.asarray(ridge_vec, dtype=np.float64))
         cycle_lengths.append(float(routes_ep_len[r_id]))
-        cycle_disps.append(disp_val)
-        cycle_angles.append(ang_val)
 
     if skipped_nan > 0:
         print(f"\n[WARN] Skipped cycles due to NaNs: {skipped_nan}/{num_cycles}")
@@ -624,8 +463,6 @@ def main():
     X = np.stack(X_cycles, axis=0).astype(np.float64)  # (N, H)
     Y = np.stack(Y_cycles, axis=0).astype(np.float64)  # (N, 441)
     cycle_lengths = np.asarray(cycle_lengths, dtype=np.float64)
-    cycle_disps = np.asarray(cycle_disps, dtype=np.float64)
-    cycle_angles = np.asarray(cycle_angles, dtype=np.float64)
     sample_cycle_ids = np.arange(X.shape[0])
     
     print(f"\n[Matrix X (Neural)]")
@@ -900,8 +737,6 @@ def main():
         U_plot = U_plot[keep_mask]
         V_plot = V_plot[keep_mask]
         cycle_lengths = cycle_lengths[keep_mask]
-        cycle_disps = cycle_disps[keep_mask]
-        cycle_angles = cycle_angles[keep_mask]
 
     # Check spread in canonical space
     u_spread = U_plot[:, :2].std(axis=0)
@@ -909,31 +744,10 @@ def main():
     print(f"  U spread (CM0, CM1): {u_spread}")
     print(f"  V spread (CM0, CM1): {v_spread}")
     
-    # Plot Figure 5 and variants
-    metadata = {
-        'Length': cycle_lengths,
-        'Displacement': cycle_disps,
-        'Angle': cycle_angles
-    }
-    
-    # Original plot (Length)
-    # alignment_path = os.path.join(args.out_dir, "figure5_alignment.png")
-    # plot_alignment(U_plot, V_plot, np.array(cycle_lengths), alignment_path, title="Alignment (z-scored U/V)")
-    # print(f"Saved alignment plot to {alignment_path}")
-    
-    # Multi-feature plots
-    plot_alignment_multi(U_plot, V_plot, metadata, args.out_dir, prefix="fig5")
-    
-    # 3D Interactive Plot
-    if U_plot.shape[1] >= 3:
-        plot_3d_interactive(
-            U_plot[:, :3], 
-            V_plot[:, :3], 
-            metadata, 
-            os.path.join(args.out_dir, "alignment_3d.html")
-        )
-    else:
-        print(f"[WARN] Only {U_plot.shape[1]} modes available, skipping 3D plot.")
+    # Plot Figure 5
+    alignment_path = os.path.join(args.out_dir, "figure5_alignment.png")
+    plot_alignment(U_plot, V_plot, np.array(cycle_lengths), alignment_path, title="Alignment (z-scored U/V)")
+    print(f"Saved alignment plot to {alignment_path}")
     
     # =========================================================================
     # PLOT ALL PATH_TILES OVERLAY (Center-aligned, exclude last point)
@@ -1050,8 +864,6 @@ def main():
         U=U,
         V=V,
         cycle_lengths=np.array(cycle_lengths),
-        cycle_disps=np.array(cycle_disps),
-        cycle_angles=np.array(cycle_angles),
         ridge_cosine_sim_mean=ridge_cos_mean,
         num_cycles=num_cycles_used,
         num_cycles_total=int(num_cycles),
