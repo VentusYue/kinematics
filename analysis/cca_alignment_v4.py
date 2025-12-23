@@ -1,15 +1,8 @@
-"""
-cca_alignment.py — v0 → current 
-
-- Global normalization **default**:
-  - global grid-unit estimator (`axis_mode`) + global scale (q=0.95) to fit trajectories into ridge grid (target_radius=9).
-  - avoids per-episode scale mismatch / out-of-frame ridge embeddings.
-- Best cycle per route: pick the highest `match_ratio` cycle for each route (1 cycle ↔ 1 behavior).
-- Cycle-level mean pooling: aggregate hidden states over the cycle to produce one neural vector per cycle.
-- Figure-5 variants: save `fig5_by_length.png`, `fig5_by_displacement.png`, `fig5_by_angle.png`.
-- 3D interactive: save `alignment_3d.html` (CM0/CM1/CM2, neural vs behavior).
-- Ridge radius tuning: expose `--ridge_radius_scale`; **default 0.6** (improves ridge diversity without the held-out collapse seen at ~0.4).
-"""
+# udpate for this version:
+'''
+1. 3d plot for all cycles
+2. add cycle_disps and cycle_angles to metadata
+'''
 
 
 import os
@@ -26,127 +19,6 @@ from analysis.ridge_embedding import build_ridge_vector
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-
-def _estimate_grid_unit_median_euclid(paths: list[np.ndarray], tol: float = 0.1) -> float:
-    """
-    Robustly estimate a global step size using Euclidean step lengths.
-    Uses median-of-medians: per-path median step -> global median.
-    """
-    step_medians: list[float] = []
-    for p in paths:
-        if p is None or len(p) < 2:
-            continue
-        diffs = np.linalg.norm(p[1:] - p[:-1], axis=1)
-        diffs = diffs[np.isfinite(diffs)]
-        diffs = diffs[diffs > tol]
-        if diffs.size > 0:
-            step_medians.append(float(np.median(diffs)))
-    if not step_medians:
-        return 1.0
-    return float(np.median(step_medians))
-
-
-def _estimate_grid_unit_axis_mode(
-    paths: list[np.ndarray],
-    tol: float = 0.1,
-    round_decimals: int = 2,
-    min_cluster_frac: float = 0.05,
-) -> tuple[float, np.ndarray]:
-    """
-    Mode-like estimator using |dx| and |dy| step components (robust when motion is axis-aligned).
-
-    Returns (grid_unit, values_used) where values_used are the axis step magnitudes.
-    """
-    vals: list[np.ndarray] = []
-    for p in paths:
-        if p is None or len(p) < 2:
-            continue
-        d = p[1:] - p[:-1]
-        dx = np.abs(d[:, 0])
-        dy = np.abs(d[:, 1])
-        a = np.concatenate([dx, dy], axis=0)
-        a = a[np.isfinite(a)]
-        a = a[a > tol]
-        if a.size > 0:
-            vals.append(a)
-
-    if not vals:
-        return 1.0, np.array([], dtype=np.float64)
-
-    a = np.concatenate(vals, axis=0).astype(np.float64)
-    if a.size == 0:
-        return 1.0, a
-
-    # "Mode-like": quantize then take the most frequent bin value, then refine by local median.
-    q = np.round(a, decimals=round_decimals)
-    uniq, cnt = np.unique(q, return_counts=True)
-    if uniq.size == 0:
-        return float(np.median(a)), a
-
-    k = int(np.argmax(cnt))
-    mode_val = float(uniq[k])
-
-    # refine: take values near that mode bin
-    bin_w = 10.0 ** (-round_decimals)
-    mask = np.abs(a - mode_val) <= (1.5 * bin_w)
-    if mask.mean() < min_cluster_frac:
-        # fallback to median if the "mode" is too weak (no clear peak)
-        return float(np.median(a)), a
-    return float(np.median(a[mask])), a
-
-
-def _compute_global_scale_factor(
-    paths: list[np.ndarray],
-    grid_unit: float,
-    target_radius: float = 9.0,
-    quantile: float = 0.95,
-) -> tuple[float, np.ndarray]:
-    """
-    Compute a global scale so that the `quantile` of trajectory extents fits within target_radius
-    (for 21x21, radius~10; default 9 leaves a margin).
-
-    Returns (scale, extents_grid_units).
-    """
-    grid_unit = float(grid_unit)
-    if not np.isfinite(grid_unit) or grid_unit <= 1e-8:
-        grid_unit = 1.0
-
-    extents: list[float] = []
-    for p in paths:
-        if p is None or len(p) == 0:
-            continue
-        p0 = (p - p[0]) / grid_unit
-        e = float(np.max(np.abs(p0)))
-        if np.isfinite(e):
-            extents.append(e)
-
-    if not extents:
-        return 1.0, np.array([], dtype=np.float64)
-
-    ext = np.asarray(extents, dtype=np.float64)
-    cutoff = float(np.quantile(ext, quantile))
-    if not np.isfinite(cutoff) or cutoff < 1e-8:
-        return 1.0, ext
-
-    scale = float(target_radius) / cutoff
-    return scale, ext
-
-
-def _rotate_path_to_disp(path: np.ndarray, eps: float = 1e-8) -> np.ndarray:
-    """
-    Rotate a (T,2) path (assumed centered at origin) so that its net displacement points to +x.
-    """
-    if path is None or len(path) == 0:
-        return path
-    d = path[-1]  # since start is (0,0)
-    dx, dy = float(d[0]), float(d[1])
-    if (dx * dx + dy * dy) < eps:
-        return path
-    theta = float(np.arctan2(dy, dx))
-    c = float(np.cos(-theta))
-    s = float(np.sin(-theta))
-    R = np.array([[c, -s], [s, c]], dtype=np.float32)
-    return (path @ R.T).astype(np.float32)
 
 def plot_3d_interactive(U_means, V_means, metadata, out_path, title="3D Alignment"):
     """
@@ -519,38 +391,6 @@ def main():
     parser.add_argument("--pca_dim_y", type=int, default=50, 
                         help="[deprecated] Ignored. We always run full PCA (up to rank) to 'straighten' the point cloud.")
     parser.add_argument("--split_seed", type=int, default=0, help="Random seed for train/test split.")
-
-    # -------------------------------------------------------------------------
-    # Update B: trajectory normalization options for ridge embedding
-    # -------------------------------------------------------------------------
-    parser.add_argument(
-        "--ridge_norm",
-        type=str,
-        default="global",
-        choices=["per_episode", "global"],
-        help="Trajectory normalization before ridge embedding. "
-             "'per_episode' = current heuristic (median euclid step per episode). "
-             "'global' = estimate one global grid unit + global scale so trajectories fit inside 21x21.",
-    )
-    parser.add_argument(
-        "--grid_unit_estimator",
-        type=str,
-        default="axis_mode",
-        choices=["median_euclid", "axis_mode"],
-        help="How to estimate the fundamental grid unit when --ridge_norm=global.",
-    )
-    parser.add_argument("--grid_step_tol", type=float, default=0.1, help="Threshold to ignore near-zero steps.")
-    parser.add_argument("--global_scale_quantile", type=float, default=0.95, help="Quantile of extents to fit inside target radius.")
-    parser.add_argument("--global_target_radius", type=float, default=9.0, help="Target radius in ridge grid units (<=10 for 21x21).")
-    parser.add_argument("--rotate_to_disp", action="store_true", help="Optionally rotate each trajectory so its net displacement points to +x before ridge embedding.")
-    parser.add_argument("--save_scale_diagnostics", action="store_true", help="Save histograms for step-size/extents when using global normalization.")
-
-    # Ridge embedding knobs
-    parser.add_argument("--ridge_aggregate", type=str, default="max", choices=["max", "sum"], help="How to aggregate point radiance fields into ridge image.")
-    parser.add_argument("--ridge_normalize_path", action="store_true", help="Also apply ridge_embedding.normalize_path_to_grid before building ridge vector.")
-    parser.add_argument("--ridge_grid_size", type=int, default=21, help="Ridge grid size (default 21 => 441D).")
-    parser.add_argument("--ridge_radius_scale", type=float, default=0.6, help="Radius scale for ridge radiance field (smaller => more local/contrast).")
-
     args = parser.parse_args()
     
     os.makedirs(args.out_dir, exist_ok=True)
@@ -587,7 +427,6 @@ def main():
     # Cycle statistics
     cycle_lens = [c.shape[0] for c in cycles_hidden]
     hidden_dims = [c.shape[1] if c.ndim > 1 else 256 for c in cycles_hidden]
-    hidden_dim0 = int(hidden_dims[0])
     print(f"\n[Cycles]")
     print(f"  Number: {num_cycles}")
     print(f"  Lengths: min={min(cycle_lens)}, max={max(cycle_lens)}, mean={np.mean(cycle_lens):.1f}")
@@ -634,95 +473,6 @@ def main():
     
     selected_indices = sorted(list(best_indices.values()))
     print(f"\n[Filtering] Selected {len(selected_indices)} best cycles from {num_cycles} total candidates (Unique Routes: {len(unique_routes)})")
-
-    # =========================================================================
-    # Update B: GLOBAL NORMALIZATION CALIBRATION (optional)
-    # =========================================================================
-    grid_unit_global = None
-    global_scale = None
-    axis_step_vals = None
-    extents_grid = None
-    if args.ridge_norm == "global":
-        print("\n" + "-"*40)
-        print("CALIBRATING TRAJECTORY NORMALIZATION (GLOBAL)")
-        print("-"*40)
-
-        calib_paths: list[np.ndarray] = []
-        for i in selected_indices:
-            r_id = int(cycles_route_id[i])
-            path_xy = routes_xy[r_id]
-            h_cycle = cycles_hidden[i]
-
-            # Ensure shape (L, H) to get a reliable cycle length for truncation
-            if h_cycle.ndim == 1 and (h_cycle.shape[0] % hidden_dim0 == 0):
-                h_cycle = h_cycle.reshape(-1, hidden_dim0)
-            if h_cycle.ndim != 2:
-                continue
-
-            L = int(h_cycle.shape[0])
-            if path_xy is None or len(path_xy) == 0:
-                continue
-            L_use = int(min(L, path_xy.shape[0]))
-            if L_use <= 0:
-                continue
-            p = np.asarray(path_xy[:L_use], dtype=np.float32)
-            if not np.isfinite(p).all():
-                continue
-            p = p - p[0]
-            calib_paths.append(p)
-
-        if args.grid_unit_estimator == "median_euclid":
-            grid_unit_global = _estimate_grid_unit_median_euclid(calib_paths, tol=args.grid_step_tol)
-            axis_step_vals = None
-            print(f"  Grid unit (median_euclid): {grid_unit_global:.4f}")
-        else:
-            grid_unit_global, axis_step_vals = _estimate_grid_unit_axis_mode(
-                calib_paths, tol=args.grid_step_tol, round_decimals=2
-            )
-            print(f"  Grid unit (axis_mode): {grid_unit_global:.4f}")
-
-        global_scale, extents_grid = _compute_global_scale_factor(
-            calib_paths,
-            grid_unit=grid_unit_global,
-            target_radius=args.global_target_radius,
-            quantile=args.global_scale_quantile,
-        )
-        if extents_grid is not None and extents_grid.size > 0:
-            qv = float(np.quantile(extents_grid, args.global_scale_quantile))
-            print(f"  Extent quantile q={args.global_scale_quantile:.2f}: {qv:.3f} grid units")
-        print(f"  Global scale: {global_scale:.4f} (target_radius={args.global_target_radius})")
-
-        if args.save_scale_diagnostics:
-            diag_path = os.path.join(args.out_dir, "ridge_scale_diagnostics.png")
-            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-            if axis_step_vals is not None and axis_step_vals.size > 0:
-                axes[0].hist(axis_step_vals, bins=80, color="steelblue", alpha=0.8)
-                axes[0].axvline(grid_unit_global, color="crimson", lw=2, label=f"grid_unit={grid_unit_global:.3f}")
-                axes[0].set_title("Axis step magnitudes (|dx|,|dy|)")
-                axes[0].set_xlabel("step size")
-                axes[0].set_ylabel("count")
-                axes[0].legend(loc="best")
-            else:
-                axes[0].text(0.5, 0.5, "axis_mode not used", ha="center", va="center")
-                axes[0].set_axis_off()
-
-            if extents_grid is not None and extents_grid.size > 0:
-                axes[1].hist(extents_grid, bins=60, color="darkorange", alpha=0.8)
-                qv = float(np.quantile(extents_grid, args.global_scale_quantile))
-                axes[1].axvline(qv, color="crimson", lw=2, label=f"q={args.global_scale_quantile:.2f}: {qv:.2f}")
-                axes[1].axvline(args.global_target_radius, color="black", lw=2, ls="--", label=f"target_radius={args.global_target_radius:.1f}")
-                axes[1].set_title("Trajectory extents in grid units (max |x| or |y|)")
-                axes[1].set_xlabel("extent")
-                axes[1].set_ylabel("count")
-                axes[1].legend(loc="best")
-            else:
-                axes[1].text(0.5, 0.5, "no extents", ha="center", va="center")
-                axes[1].set_axis_off()
-
-            plt.tight_layout()
-            plt.savefig(diag_path, dpi=200, bbox_inches="tight")
-            plt.close()
-            print(f"  Saved scaling diagnostics to {diag_path}")
     
     # =========================================================================
     # BUILD DATA MATRICES
@@ -746,6 +496,7 @@ def main():
     est_grid_steps: list[float] = []
     all_path_tiles: list[np.ndarray] = []  # Store normalized path_tile for visualization
 
+    hidden_dim0 = int(hidden_dims[0])
     skipped_nan = 0
 
     for i in selected_indices:
@@ -779,56 +530,27 @@ def main():
         h_cycle = h_cycle[:L_use]
         path_xy = path_xy[:L_use]
 
-        # Center at origin first
-        path_centered = (path_xy - path_xy[0]).astype(np.float32)
-
-        # Pick a normalization unit (grid unit) and (optional) a scale to fit ridge canvas
-        if args.ridge_norm == "global":
-            if grid_unit_global is None or global_scale is None:
-                # Safety fallback (should not happen)
-                grid_unit = 1.0
-                scale = 1.0
-            else:
-                grid_unit = float(grid_unit_global)
-                scale = float(global_scale)
-        else:
-            # Original per-episode heuristic
-            if len(path_xy) > 1:
-                diffs = np.linalg.norm(path_xy[1:] - path_xy[:-1], axis=1)
-                diffs = diffs[diffs > args.grid_step_tol]
-                grid_unit = float(np.median(diffs)) if len(diffs) > 0 else 1.0
-            else:
-                grid_unit = 1.0
-            grid_unit = max(grid_unit, 1e-3)
-            scale = 1.0
-
-        est_grid_steps.append(grid_unit)
-
-        # Convert to (approx) tile/grid units
-        path_grid = (path_centered / grid_unit).astype(np.float32)
-
-        # Geometry features computed BEFORE optional rotation/scaling (so Angle remains meaningful)
-        d_vec = path_grid[-1] if len(path_grid) > 0 else np.array([0.0, 0.0], dtype=np.float32)
+        # Compute geometry features on the segment associated with the cycle
+        d_vec = path_xy[-1] - path_xy[0]
         disp_val = float(np.linalg.norm(d_vec))
-        ang_val = float(np.arctan2(float(d_vec[1]), float(d_vec[0])))
+        ang_val = float(np.arctan2(d_vec[1], d_vec[0]))
 
-        # Optional rotation (can reduce orientation variance, but may remove informative angle structure)
-        if args.rotate_to_disp:
-            path_grid_for_ridge = _rotate_path_to_disp(path_grid)
+        # Grid step normalization heuristic
+        if len(path_xy) > 1:
+            diffs = np.linalg.norm(path_xy[1:] - path_xy[:-1], axis=1)
+            diffs = diffs[diffs > 0.1]
+            est_grid_step = float(np.median(diffs)) if len(diffs) > 0 else 1.0
         else:
-            path_grid_for_ridge = path_grid
+            est_grid_step = 1.0
+        est_grid_step = max(est_grid_step, 1e-3)
+        est_grid_steps.append(est_grid_step)
 
-        # Global scale (if enabled) to fit the ridge canvas
-        path_tile = (path_grid_for_ridge * scale).astype(np.float32)
+        # Normalize to (approx) tile units and align first point to origin
+        path_tile = (path_xy / est_grid_step).astype(np.float32)
+        path_tile = path_tile - path_tile[0]
 
         # Behavior embedding: ridge image flatten (441D)
-        ridge_vec = build_ridge_vector(
-            path_tile,
-            grid_size=args.ridge_grid_size,
-            radius_scale=args.ridge_radius_scale,
-            aggregate=args.ridge_aggregate,
-            normalize_path=args.ridge_normalize_path,
-        )  # (441,)
+        ridge_vec = build_ridge_vector(path_tile)  # (441,)
         ridge_vecs.append(ridge_vec)
         all_path_tiles.append(path_tile.copy())
 
