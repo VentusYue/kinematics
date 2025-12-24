@@ -247,7 +247,7 @@ echo ""
 CCA_START=$(date +%s)
 
 # Build CCA arguments
-CCA_ARGS="--num_modes=${NUM_MODES} --pca_dim_x=${PCA_DIM_X} --pca_dim_y=${PCA_DIM_Y}"
+CCA_ARGS="--num_modes=${NUM_MODES} --test_frac=${TEST_FRAC} --pca_dim_x=${PCA_DIM_X} --pca_dim_y=${PCA_DIM_Y}"
 [ "${FILTER_OUTLIERS}" = "true" ] && CCA_ARGS="${CCA_ARGS} --filter_outliers"
 CCA_ARGS="${CCA_ARGS} --ridge_norm=${RIDGE_NORM} --grid_unit_estimator=${GRID_UNIT_ESTIMATOR} --global_scale_quantile=${GLOBAL_SCALE_QUANTILE} --global_target_radius=${GLOBAL_TARGET_RADIUS} --ridge_radius_scale=${RIDGE_RADIUS_SCALE} --ridge_aggregate=${RIDGE_AGGREGATE}"
 [ "${RIDGE_NORMALIZE_PATH}" = "true" ] && CCA_ARGS="${CCA_ARGS} --ridge_normalize_path"

@@ -1,17 +1,15 @@
 #!/bin/bash
 # =============================================================================
-# Meta-RL Behavior-Neural Alignment Analysis Pipeline (2e5 collection) - v2
+# Meta-RL Behavior-Neural Alignment Analysis Pipeline (10k collection)
 #
-# Difference vs run_analysis_2e5.sh:
-#   - Step 2 runs analysis/cca_alignment_v2.py (full PCA, reference-style)
-#   - Does NOT pass --pca_dim_x/--pca_dim_y (dims are intentionally not configurable)
+# Runs:
+#   Step 1: PKD Cycle Sampling
+#   Step 2: CCA Alignment Analysis
+#   Step 3: Trajectory Statistics
 #
 # Usage:
-#   ./run_analysis_2e5_v2.sh              # Run full pipeline
-#   ./run_analysis_2e5_v2.sh --skip-pkd   # Skip PKD, use existing cycles
-#
-# Optional env overrides:
-#   CCA_SCRIPT=analysis/cca_alignment_v2.py   (default)
+#   ./run_analysis_10k_gpuopt_step170196992.sh              # Run full pipeline
+#   ./run_analysis_10k_gpuopt_step170196992.sh --skip-pkd   # Skip PKD, use existing cycles
 # =============================================================================
 
 set -e  # Exit on error
@@ -48,36 +46,37 @@ done
 # =============================================================================
 
 # Source routes (from collection output)
-SOURCE_ROUTES="/root/backup/kinematics/experiments/run_random_seeds_2e5/data/routes.npz"
+SOURCE_ROUTES="/root/backup/kinematics/experiments/run_random_seeds_10k_gpuopt_step170196992/data/routes.npz"
 
-# Output experiment name
-EXP_NAME="run_random_seeds_2e5_analysis_cca_ac80_gemini_debug"
+# Output experiment name (analysis outputs go under BASE_OUT_DIR/EXP_NAME/)
+# Picked a new name to avoid collisions with earlier runs and make it obvious
+# which checkpoint the analysis corresponds to.
+EXP_NAME="run_random_seeds_10k_gpuopt_step170196992_analysis_v0_ac60_5-100-h50"
 
 # Model checkpoint (same as collection)
-MODEL_CKPT="/root/logs/ppo/meta-rl-maze-dense-long-n1280meta-40gpu1/model.tar"
+MODEL_CKPT="/root/logs/ppo/meta-rl-maze-easy-n10k-trial10-dense-gpu-opt/model_step_170196992.tar"
 
 # Base output directory
 BASE_OUT_DIR="/root/backup/kinematics/experiments"
 
 # Device
-DEVICE="cuda:0"
-
-# CCA script (v2)
-CCA_SCRIPT="${CCA_SCRIPT:-analysis/cca_alignment_v2.py}"
+DEVICE="cuda:1"
 
 # =============================================================================
 # PKD CYCLE SAMPLER PARAMETERS
 # =============================================================================
 
-NUM_H0=20               # Number of random h0 to sample per route
+NUM_H0=50               # Number of random h0 to sample per route
 WARMUP_PERIODS=8        # Periods to warmup
 SAMPLE_PERIODS=2        # Periods to check convergence
-AC_MATCH_THRESH=0.8     # Action consistency threshold (0.8 = 80% match)
+AC_MATCH_THRESH=0.6     # Action consistency threshold (0.8 = 80% match)
 SEED=42                 # Random seed
 
 # Length filtering
 MIN_LENGTH="5"          # Minimum sequence length
-MAX_LENGTH="30"         # Maximum sequence length
+MAX_LENGTH="100"         # Maximum sequence length
+PCA_DIM_X=50            # PCA dims for Neural state (X)
+PCA_DIM_Y=50            # PCA dims for Behavior Ridge (Y)
 
 # =============================================================================
 # CCA PARAMETERS
@@ -85,6 +84,20 @@ MAX_LENGTH="30"         # Maximum sequence length
 
 NUM_MODES=10            # Number of CCA modes to visualize
 FILTER_OUTLIERS="true"  # Filter outliers in alignment plot
+TEST_FRAC="0.2"         # Held-out fraction for reporting test correlations
+
+# -----------------------------------------------------------------------------
+# CCA / Ridge defaults (one-run, no tuning)
+# -----------------------------------------------------------------------------
+# Global normalization (Update B) + a moderate ridge radius_scale that improves
+# ridge diversity without the held-out collapse seen at very small radii.
+RIDGE_NORM="global"               # global | per_episode
+GRID_UNIT_ESTIMATOR="axis_mode"   # axis_mode | median_euclid
+GLOBAL_SCALE_QUANTILE="0.95"
+GLOBAL_TARGET_RADIUS="9.0"
+RIDGE_RADIUS_SCALE="0.8"
+RIDGE_AGGREGATE="max"             # max | sum
+RIDGE_NORMALIZE_PATH="false"      # true | false
 
 # =============================================================================
 # DERIVED PATHS
@@ -118,14 +131,13 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║         META-RL ALIGNMENT ANALYSIS PIPELINE (v2)             ║"
+echo "║         META-RL ALIGNMENT ANALYSIS PIPELINE                  ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Experiment:    ${EXP_NAME}"
 echo "Source routes: ${SOURCE_ROUTES}"
 echo "Model:         ${MODEL_CKPT}"
 echo "Device:        ${DEVICE}"
-echo "CCA script:    ${CCA_SCRIPT}"
 echo "Started:       $(date)"
 echo ""
 echo "Output: ${EXP_DIR}/"
@@ -157,7 +169,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 
 # =============================================================================
-# STEP 1: PKD CYCLE SAMPLING
+# STEP 1: PKD Cycle Sampling
 # =============================================================================
 
 PKD_TIME=0
@@ -217,25 +229,32 @@ else
 fi
 
 # =============================================================================
-# STEP 2: CCA ALIGNMENT ANALYSIS (v2)
+# STEP 2: CCA Alignment Analysis
 # =============================================================================
 
 echo "╭──────────────────────────────────────────────────────────────╮"
-echo "│ STEP 2: CCA Alignment Analysis (v2)                          │"
+echo "│ STEP 2: CCA Alignment Analysis                               │"
 echo "╰──────────────────────────────────────────────────────────────╯"
 echo ""
 echo "Parameters:"
 echo "  ├── num_modes:       ${NUM_MODES}"
 echo "  └── filter_outliers: ${FILTER_OUTLIERS}"
+echo "  ├── ridge_norm:      ${RIDGE_NORM}"
+echo "  ├── grid_unit:       ${GRID_UNIT_ESTIMATOR}"
+echo "  ├── global_scale_q:  ${GLOBAL_SCALE_QUANTILE}"
+echo "  ├── target_radius:   ${GLOBAL_TARGET_RADIUS}"
+echo "  └── ridge_radius:    ${RIDGE_RADIUS_SCALE}"
 echo ""
 
 CCA_START=$(date +%s)
 
-# Build CCA arguments (no PCA dims here; v2 script runs full PCA).
-CCA_ARGS="--num_modes=${NUM_MODES}"
+# Build CCA arguments
+CCA_ARGS="--num_modes=${NUM_MODES} --pca_dim_x=${PCA_DIM_X} --pca_dim_y=${PCA_DIM_Y}"
 [ "${FILTER_OUTLIERS}" = "true" ] && CCA_ARGS="${CCA_ARGS} --filter_outliers"
+CCA_ARGS="${CCA_ARGS} --ridge_norm=${RIDGE_NORM} --grid_unit_estimator=${GRID_UNIT_ESTIMATOR} --global_scale_quantile=${GLOBAL_SCALE_QUANTILE} --global_target_radius=${GLOBAL_TARGET_RADIUS} --ridge_radius_scale=${RIDGE_RADIUS_SCALE} --ridge_aggregate=${RIDGE_AGGREGATE}"
+[ "${RIDGE_NORMALIZE_PATH}" = "true" ] && CCA_ARGS="${CCA_ARGS} --ridge_normalize_path"
 
-python -W ignore "${CCA_SCRIPT}" \
+python -W ignore analysis/cca_alignment.py \
     --cycles_npz="${CYCLES_NPZ}" \
     --routes_npz="${SOURCE_ROUTES}" \
     --out_dir="${FIGURES_DIR}" \
@@ -249,7 +268,7 @@ echo "[STEP 2 COMPLETE] CCA analysis: ${CCA_TIME}s"
 echo ""
 
 # =============================================================================
-# STEP 3: TRAJECTORY STATISTICS
+# STEP 3: Trajectory Statistics
 # =============================================================================
 
 echo "╭──────────────────────────────────────────────────────────────╮"
@@ -300,7 +319,12 @@ echo "    ├── routes.npz (symlink)"
 echo "    └── pkd_cycles.npz"
 echo "  figures/"
 echo "    ├── cca_lollipop.png"
-echo "    ├── figure5_alignment.png"
+echo "    ├── fig5_by_length.png"
+echo "    ├── fig5_by_displacement.png"
+echo "    ├── fig5_by_angle.png"
+echo "    ├── alignment_3d.html"
+echo "    ├── all_paths_overlay.png"
+echo "    ├── cca_results.npz"
 echo "    ├── length_distribution.png"
 echo "    ├── xy_trajectories.png"
 echo "    ├── seed_coverage.png"

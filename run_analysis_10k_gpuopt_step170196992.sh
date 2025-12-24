@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Meta-RL Behavior-Neural Alignment Analysis Pipeline (2e5 collection)
+# Meta-RL Behavior-Neural Alignment Analysis Pipeline (10k collection)
 #
 # Runs:
 #   Step 1: PKD Cycle Sampling
@@ -8,8 +8,8 @@
 #   Step 3: Trajectory Statistics
 #
 # Usage:
-#   ./run_analysis_2e5.sh              # Run full pipeline
-#   ./run_analysis_2e5.sh --skip-pkd   # Skip PKD, use existing cycles
+#   ./run_analysis_10k_gpuopt_step170196992.sh              # Run full pipeline
+#   ./run_analysis_10k_gpuopt_step170196992.sh --skip-pkd   # Skip PKD, use existing cycles
 # =============================================================================
 
 set -e  # Exit on error
@@ -46,33 +46,35 @@ done
 # =============================================================================
 
 # Source routes (from collection output)
-SOURCE_ROUTES="/root/backup/kinematics/experiments/run_random_seeds_2e5/data/routes.npz"
+SOURCE_ROUTES="/root/backup/kinematics/experiments/run_random_seeds_10k_gpuopt_step170196992/data/routes.npz"
 
-# Output experiment name
-EXP_NAME="run_random_seeds_2e5_analysis_cca_ac80_v5"
+# Output experiment name (analysis outputs go under BASE_OUT_DIR/EXP_NAME/)
+# Picked a new name to avoid collisions with earlier runs and make it obvious
+# which checkpoint the analysis corresponds to.
+EXP_NAME="run_random_seeds_10k_gpuopt_step170196992_analysis_v0_30-100-h50"
 
 # Model checkpoint (same as collection)
-MODEL_CKPT="/root/logs/ppo/meta-rl-maze-dense-long-n1280meta-40gpu1/model.tar"
+MODEL_CKPT="/root/logs/ppo/meta-rl-maze-easy-n10k-trial10-dense-gpu-opt/model_step_170196992.tar"
 
 # Base output directory
 BASE_OUT_DIR="/root/backup/kinematics/experiments"
 
 # Device
-DEVICE="cuda:1"
+DEVICE="cuda:0"
 
 # =============================================================================
 # PKD CYCLE SAMPLER PARAMETERS
 # =============================================================================
 
-NUM_H0=20               # Number of random h0 to sample per route
+NUM_H0=50               # Number of random h0 to sample per route
 WARMUP_PERIODS=8        # Periods to warmup
 SAMPLE_PERIODS=2        # Periods to check convergence
 AC_MATCH_THRESH=0.8     # Action consistency threshold (0.8 = 80% match)
 SEED=42                 # Random seed
 
 # Length filtering
-MIN_LENGTH="5"          # Minimum sequence length
-MAX_LENGTH="30"         # Maximum sequence length
+MIN_LENGTH="30"          # Minimum sequence length
+MAX_LENGTH="100"         # Maximum sequence length
 PCA_DIM_X=50            # PCA dims for Neural state (X)
 PCA_DIM_Y=50            # PCA dims for Behavior Ridge (Y)
 

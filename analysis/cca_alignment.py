@@ -8,7 +8,7 @@ cca_alignment.py — v0 → current
 - Cycle-level mean pooling: aggregate hidden states over the cycle to produce one neural vector per cycle.
 - Figure-5 variants: save `fig5_by_length.png`, `fig5_by_displacement.png`, `fig5_by_angle.png`.
 - 3D interactive: save `alignment_3d.html` (CM0/CM1/CM2, neural vs behavior).
-- Ridge radius tuning: expose `--ridge_radius_scale`; **default 0.6** (improves ridge diversity without the held-out collapse seen at ~0.4).
+- Ridge radius tuning: expose `--ridge_radius_scale`; **default 0.6**.
 """
 
 
@@ -250,33 +250,6 @@ def plot_alignment_multi(U_means, V_means, metadata, out_dir, prefix="fig5"):
         plot_alignment(U_means, V_means, values, out_path, title=f"Alignment colored by {key}")
         print(f"Saved alignment plot colored by {key} to {out_path}")
 
-def _safe_colwise_corr(U: np.ndarray, V: np.ndarray) -> np.ndarray:
-    """
-    Compute Pearson correlation for each corresponding column in U and V.
-    Returns NaN for columns with near-zero std.
-    """
-    assert U.shape == V.shape
-    u = U - U.mean(axis=0, keepdims=True)
-    v = V - V.mean(axis=0, keepdims=True)
-    u_std = u.std(axis=0)
-    v_std = v.std(axis=0)
-    denom = u_std * v_std
-    out = np.full((U.shape[1],), np.nan, dtype=np.float64)
-    ok = denom > 1e-12
-    out[ok] = (u[:, ok] * v[:, ok]).mean(axis=0) / denom[ok]
-    return out
-
-
-def _standardize_fit(X0: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    mean = np.mean(X0, axis=0)
-    std = np.std(X0, axis=0)
-    std = np.where(std == 0, 1.0, std)
-    return mean, std
-
-
-def _standardize_apply(X0: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
-    return (X0 - mean) / std
-
 
 def _zscore_cols(Z: np.ndarray, eps: float = 1e-8) -> np.ndarray:
     """
@@ -408,33 +381,6 @@ def plot_lollipop(scores, out_path, title="Canonical Correlation", xlabel="Mode"
     plt.savefig(out_path, dpi=300)
     plt.close()
 
-def plot_lollipop_train_test(train_scores, test_scores, out_path, title="Canonical Correlation (Train vs Test)", xlabel="Mode", ylabel="Correlation"):
-    """
-    Overlay train and held-out (test) canonical correlations.
-    """
-    m = min(len(train_scores), len(test_scores))
-    train_scores = np.asarray(train_scores)[:m]
-    test_scores = np.asarray(test_scores)[:m]
-    x = np.arange(m)
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.vlines(x, 0, train_scores, colors='gray', lw=1, alpha=0.35)
-    ax.plot(x, train_scores, color='gray', marker='o', markersize=6, linestyle='-', linewidth=1, alpha=0.6, label='train (in-sample)')
-    ax.plot(x, test_scores, color='black', marker='o', markersize=7, linestyle='-', linewidth=1.5, label='test (held-out)')
-    for i, score in enumerate(test_scores):
-        if np.isfinite(score):
-            ax.annotate(f'{score:.2f}', (i, score), textcoords="offset points",
-                        xytext=(0, 10), ha='center', va='bottom', fontsize=8)
-    ax.set_ylim(0, 1.1)
-    ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    ax.set_xticks(x)
-    ax.set_xticklabels(range(1, m + 1))
-    ax.legend(loc='best')
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=300)
-    plt.close()
-
 def plot_alignment(U_means, V_means, colors, out_path, title="Alignment"):
     """
     Scatter plot of U vs V
@@ -512,13 +458,10 @@ def main():
     parser.add_argument("--noise_seed", type=int, default=0, help="RNG seed for the small-noise injection.")
     parser.add_argument("--drop_const_tol", type=float, default=1e-8,
                         help="Drop features whose across-sample std <= this threshold (done before noise/PCA).")
-    parser.add_argument("--test_frac", type=float, default=0.2,
-                        help="Held-out fraction of cycles for reporting out-of-sample canonical correlations.")
     parser.add_argument("--pca_dim_x", type=int, default=50,
                         help="[deprecated] Ignored. We always run full PCA (up to rank) to 'straighten' the point cloud.")
     parser.add_argument("--pca_dim_y", type=int, default=50, 
                         help="[deprecated] Ignored. We always run full PCA (up to rank) to 'straighten' the point cloud.")
-    parser.add_argument("--split_seed", type=int, default=0, help="Random seed for train/test split.")
 
     # -------------------------------------------------------------------------
     # Update B: trajectory normalization options for ridge embedding
@@ -897,7 +840,6 @@ def main():
         print("[ERROR] Need at least 2 cycles to run CCA.")
         return
 
-    # Keep a copy for held-out evaluation (we'll fit PCA on train only).
     X_raw = X.copy()
     Y_raw = Y.copy()
 
@@ -939,90 +881,6 @@ def main():
     print("\n" + "-"*40)
     print("RUNNING CCA")
     print("-"*40)
-    
-    # -------------------------------------------------------------------------
-    # Report held-out correlations to avoid in-sample inflation.
-    # We split by cycle (route identity) regardless of cca_level to prevent leakage.
-    # -------------------------------------------------------------------------
-    print("\n[Held-out evaluation]")
-    if not (0.0 < args.test_frac < 1.0):
-        print("  [warn] test_frac outside (0,1); skipping held-out evaluation.")
-        do_eval = False
-    else:
-        do_eval = True
-
-    r_test = None
-    r_train_emp = None
-    train_idx = None
-    test_idx = None
-
-    if do_eval:
-        n_obs_raw = int(X_raw.shape[0])
-        if n_obs_raw < 3:
-            print("  [warn] Too few cycles for a meaningful train/test split; skipping held-out evaluation.")
-        else:
-            rng = np.random.default_rng(args.split_seed)
-            perm = rng.permutation(n_obs_raw)
-            n_test = max(1, int(round(args.test_frac * n_obs_raw)))
-            test_idx = perm[:n_test]
-            train_idx = perm[n_test:]
-
-            X_tr0, Y_tr0 = X_raw[train_idx], Y_raw[train_idx]
-            X_te0, Y_te0 = X_raw[test_idx], Y_raw[test_idx]
-
-            # Drop near-constant columns based on train only, then apply the same mask to test.
-            vx = X_tr0.std(axis=0)
-            vy = Y_tr0.std(axis=0)
-            keep_x_tr = vx > args.drop_const_tol
-            keep_y_tr = vy > args.drop_const_tol
-            X_tr = X_tr0[:, keep_x_tr]
-            X_te = X_te0[:, keep_x_tr]
-            Y_tr = Y_tr0[:, keep_y_tr]
-            Y_te = Y_te0[:, keep_y_tr]
-
-            # Add tiny noise (same setting as full run) to stabilize degeneracies.
-            if args.noise_eps and args.noise_eps > 0:
-                rng_noise = np.random.default_rng(args.noise_seed)
-                eps = float(args.noise_eps)
-                X_tr = X_tr + rng_noise.uniform(-eps, eps, size=X_tr.shape)
-                X_te = X_te + rng_noise.uniform(-eps, eps, size=X_te.shape)
-                Y_tr = Y_tr + rng_noise.uniform(-eps, eps, size=Y_tr.shape)
-                Y_te = Y_te + rng_noise.uniform(-eps, eps, size=Y_te.shape)
-
-            # Full PCA fitted on train only (avoid leakage).
-            ncomp_x_tr = int(min(X_tr.shape[0] - 1, X_tr.shape[1]))
-            ncomp_y_tr = int(min(Y_tr.shape[0] - 1, Y_tr.shape[1]))
-            if ncomp_x_tr < 1 or ncomp_y_tr < 1:
-                print("  [warn] Not enough rank in train split for PCA/CCA; skipping held-out evaluation.")
-            else:
-                pca_x_tr = PCA(n_components=ncomp_x_tr, svd_solver="full")
-                pca_y_tr = PCA(n_components=ncomp_y_tr, svd_solver="full")
-                X_tr_p = pca_x_tr.fit_transform(X_tr)
-                X_te_p = pca_x_tr.transform(X_te)
-                Y_tr_p = pca_y_tr.fit_transform(Y_tr)
-                Y_te_p = pca_y_tr.transform(Y_te)
-
-                # Standardize by train stats before CCA + compute empirical held-out correlations.
-                xm, xs = _standardize_fit(X_tr_p)
-                ym, ys = _standardize_fit(Y_tr_p)
-                X_tr_z = _standardize_apply(X_tr_p, xm, xs)
-                Y_tr_z = _standardize_apply(Y_tr_p, ym, ys)
-                X_te_z = _standardize_apply(X_te_p, xm, xs)
-                Y_te_z = _standardize_apply(Y_te_p, ym, ys)
-
-                A_z, B_z, _, _, _ = canoncorr(X_tr_z, Y_tr_z, fullReturn=True)
-                U_tr = X_tr_z @ A_z
-                V_tr = Y_tr_z @ B_z
-                U_te = X_te_z @ A_z
-                V_te = Y_te_z @ B_z
-                r_train_emp = _safe_colwise_corr(U_tr, V_tr)
-                r_test = _safe_colwise_corr(U_te, V_te)
-
-                r_train_emp = np.clip(np.abs(r_train_emp), 0, 1)
-                r_test = np.clip(np.abs(r_test), 0, 1)
-
-                print(f"  Split by cycles: train={len(train_idx)}, test={len(test_idx)} (test_frac={args.test_frac})")
-                print(f"  Top {min(10, len(r_test))} held-out correlations: {r_test[:10]}")
 
     try:
         A, B, r, U, V = canoncorr(X, Y, fullReturn=True)
@@ -1052,12 +910,8 @@ def main():
     
     # Save lollipop
     lollipop_path = os.path.join(args.out_dir, "cca_lollipop.png")
-    if r_test is not None and r_train_emp is not None:
-        plot_lollipop_train_test(r_train_emp[:args.num_modes], r_test[:args.num_modes], lollipop_path)
-        print(f"\nSaved train-vs-test lollipop plot to {lollipop_path}")
-    else:
-        plot_lollipop(r[:args.num_modes], lollipop_path)
-        print(f"\nSaved lollipop plot to {lollipop_path}")
+    plot_lollipop(r[:args.num_modes], lollipop_path)
+    print(f"\nSaved lollipop plot to {lollipop_path}")
     
     # =========================================================================
     # FIGURE 5 (reference-style): plot U[:,0:2] and V[:,0:2] directly
@@ -1269,8 +1123,6 @@ def main():
     np.savez_compressed(
         results_path,
         correlations_in_sample=r,
-        correlations_train_empirical=r_train_emp if r_train_emp is not None else np.array([]),
-        correlations_test_heldout=r_test if r_test is not None else np.array([]),
         # For compatibility with older scripts, keep these keys.
         # In this version, these are the *direct* canonical variates (one row per cycle),
         # z-scored column-wise for plotting (reference-style).
@@ -1287,8 +1139,6 @@ def main():
         num_cycles_total=int(num_cycles),
         cca_level=args.cca_level,
         x_agg=args.x_agg,
-        test_frac=args.test_frac,
-        split_seed=args.split_seed,
     )
     print(f"Saved detailed results to {results_path}")
     
