@@ -722,7 +722,19 @@ def main():
             print(f"[WARN] Cycle {i}: unexpected h_cycle shape={getattr(h_cycle, 'shape', None)}; skipping.")
             continue
 
-        path_xy = routes_xy[r_id]  # (T_route, 2)
+        path_xy = routes_xy[r_id]  # (T_route, 2) (may arrive as dtype=object)
+
+        # Robust coercion: depending on how routes were saved (npz object arrays),
+        # per-route arrays can sometimes load as dtype=object even though values are numeric.
+        # We coerce both views to numeric arrays before NaN checks / math.
+        try:
+            path_xy = np.asarray(path_xy, dtype=np.float32)
+        except Exception:
+            pass
+        try:
+            h_cycle = np.asarray(h_cycle, dtype=np.float32)
+        except Exception:
+            pass
 
         if np.isnan(path_xy).any() or np.isnan(h_cycle).any():
             skipped_nan += 1

@@ -182,10 +182,11 @@ class PersistentTaskWrapper(gym.Wrapper):
     without destroying the process.
     Also handles XY extraction.
     """
-    def __init__(self, env_name: str, distribution_mode: str, adapt_episodes: int):
+    def __init__(self, env_name: str, distribution_mode: str, adapt_episodes: int, max_steps: int = 512):
         self.env_name = env_name
         self.distribution_mode = distribution_mode
         self.adapt_episodes = adapt_episodes
+        self.max_steps = int(max_steps)
         self.current_seed = -1
         
         # Create initial dummy env to satisfy gym.Wrapper
@@ -194,6 +195,7 @@ class PersistentTaskWrapper(gym.Wrapper):
         
         self._last_xy = (float("nan"), float("nan"))
         self._episode_idx = 0
+        self._step_in_ep = 0
 
     def _create_inner(self, seed: int):
         # Create the actual gym env
@@ -213,6 +215,7 @@ class PersistentTaskWrapper(gym.Wrapper):
         self.env = self._create_inner(seed)
         self.current_seed = seed
         self._episode_idx = 0
+        self._step_in_ep = 0
         self._last_xy = (float("nan"), float("nan"))
         
         # Reset new env
@@ -230,6 +233,7 @@ class PersistentTaskWrapper(gym.Wrapper):
     def reset(self, **kwargs):
         # Normal reset (e.g. auto-reset by VecEnv or manual)
         obs = self.env.reset(**kwargs)
+        self._step_in_ep = 0
         if self._tracking_enabled():
             self._last_xy = _extract_xy_from_env(self.env)
         else:
@@ -243,10 +247,29 @@ class PersistentTaskWrapper(gym.Wrapper):
         obs, reward, done, info = self.env.step(action)
         if info is None:
             info = {}
+
+        # Increment step counter and optionally force a timeout termination to
+        # keep episode boundaries consistent with the collector's `--max_steps`.
+        self._step_in_ep += 1
+        if (not done) and (self.max_steps > 0) and (self._step_in_ep >= self.max_steps):
+            done = True
+
+        # ---------------------------------------------------------------------
+        # Coordinate bookkeeping
+        #
+        # Important for downstream kinematics/CCA:
+        # - We want `routes_xy[t]` to align with `routes_obs[t]` / `routes_actions[t]`,
+        #   i.e. behavior state *before* taking action at step t (x_t).
+        # - VecEnv workers often auto-reset on done; we keep `xy_before` as the
+        #   stable per-step coordinate even when `obs` after done is a reset obs.
+        # ---------------------------------------------------------------------
+        info["xy_before"] = xy_before
             
         if done:
+            # terminal_xy is the last "pre-step" coordinate (x_t) for the step that ended the episode
             info["terminal_xy"] = xy_before
             self._episode_idx += 1
+            self._step_in_ep = 0
             
             if self._tracking_enabled():
                 xy_after = _extract_xy_from_env(self.env)
@@ -271,12 +294,12 @@ class PersistentTaskWrapper(gym.Wrapper):
         return self._last_xy
 
 
-def make_persistent_env_fn(env_name: str, distribution_mode: str, adapt_episodes: int):
+def make_persistent_env_fn(env_name: str, distribution_mode: str, adapt_episodes: int, max_steps: int):
     def _thunk():
         _suppress_all_warnings()
         import gym as _gym
         _gym.logger.set_level(40)
-        return PersistentTaskWrapper(env_name, distribution_mode, adapt_episodes)
+        return PersistentTaskWrapper(env_name, distribution_mode, adapt_episodes, max_steps=max_steps)
     return _thunk
 
 
@@ -394,9 +417,9 @@ def _suppress_all_warnings():
     _warnings.warn = lambda *args, **kwargs: None
 
 
-def create_persistent_vec_env(env_name: str, num_processes: int, distribution_mode: str, adapt_episodes: int):
+def create_persistent_vec_env(env_name: str, num_processes: int, distribution_mode: str, adapt_episodes: int, max_steps: int):
     # Create env fns
-    env_fns = [make_persistent_env_fn(env_name, distribution_mode, adapt_episodes) for _ in range(num_processes)]
+    env_fns = [make_persistent_env_fn(env_name, distribution_mode, adapt_episodes, max_steps=max_steps) for _ in range(num_processes)]
     
     # Use FasterSubprocVecEnv
     venv = FasterSubprocVecEnv(env_fns)
@@ -690,9 +713,12 @@ def run_batch_collection_v2(envs, actor_critic, batch_seeds, args, device, fast_
             
             info_i = infos[i] if i < len(infos) else {}
             if isinstance(info_i, dict):
-                if "level_complete" in info_i:
+                # Procgen gym infos typically expose `prev_level_complete` (int 0/1),
+                # while procgen-tools state bytes contain `step_data.level_complete`.
+                # Support both to robustly detect completion across envs.
+                if ("level_complete" in info_i) or ("prev_level_complete" in info_i):
                     ep_bufs[i].level_complete_key_seen = True
-                if info_i.get("level_complete", False):
+                if bool(info_i.get("level_complete", False)) or bool(info_i.get("prev_level_complete", False)):
                     ep_bufs[i].info_level_complete = True
 
             # Storage (Obs/Act/Rew/XY) - ONLY if recording
@@ -701,10 +727,16 @@ def run_batch_collection_v2(envs, actor_critic, batch_seeds, args, device, fast_
                 ep_bufs[i].rewards.append(float(reward_np[i]))
                 
                 # XY
-                if done_np[i]:
+                # Prefer the pre-step coordinate for alignment:
+                # routes_xy[t] == x_t aligns with routes_obs[t]/routes_actions[t].
+                if isinstance(info_i, dict) and ("xy_before" in info_i):
+                    xy = info_i.get("xy_before", (float("nan"), float("nan")))
+                elif done_np[i]:
+                    # Back-compat fallback: terminal_xy is also pre-step.
                     term_xy = info_i.get("terminal_xy", None) if isinstance(info_i, dict) else None
                     xy = term_xy if term_xy is not None else (float("nan"), float("nan"))
                 else:
+                    # Back-compat fallback: post-step xy (may be x_{t+1})
                     xy = info_i.get("xy", (float("nan"), float("nan"))) if isinstance(info_i, dict) else (float("nan"), float("nan"))
                 
                 if np.isnan(xy[0]) or np.isnan(xy[1]):
@@ -900,7 +932,7 @@ def main():
     # PERSISTENT ENV CREATION
     # We create them ONCE.
     print(f"Creating {args.num_processes} persistent env processes...", end="", flush=True)
-    envs = create_persistent_vec_env(args.env_name, args.num_processes, args.distribution_mode, args.adapt_episodes)
+    envs = create_persistent_vec_env(args.env_name, args.num_processes, args.distribution_mode, args.adapt_episodes, max_steps=args.max_steps)
     print(" done.")
 
     # Loop state

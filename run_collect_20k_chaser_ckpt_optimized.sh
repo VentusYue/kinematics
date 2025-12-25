@@ -1,18 +1,21 @@
 #!/bin/bash
 # =============================================================================
-# Meta-RL Route Collection (CaveFlyer) with Checkpointing - OPTIMIZED collector
+# Meta-RL Route Collection (Chaser) with Checkpointing - OPTIMIZED collector
 #
-# Collector:
-#   eval/collect_meta_routes_optimized.py
+# Based on:
+# - run_collect_20k_coinrun_ckpt_optimized.sh
+# - eval/collect_meta_routes_optimized.py
 #
-# Notes for CaveFlyer:
-# - CaveFlyer can give positive reward without reaching the exit (shooting targets).
-#   For analysis we typically want true level completion trajectories, so we use:
-#     --success_policy=prefer_level_complete
+# Notes for Chaser:
+# - Procgen gym exposes `prev_level_complete` (not `level_complete`) in info; the
+#   optimized collector maps this into success tracking (see collector code).
+# - For Chaser, reward can be positive without finishing the level (orb pickups),
+#   so we recommend `--success_policy=prefer_level_complete` to ensure "success"
+#   means full level completion when the signal exists.
 #
 # Usage:
-#   ./run_collect_20k_caveflyer_ckpt_optimized.sh              # Start or resume collection
-#   ./run_collect_20k_caveflyer_ckpt_optimized.sh --fresh      # Force fresh start (delete old checkpoint)
+#   ./run_collect_20k_chaser_ckpt_optimized.sh              # Start or resume collection
+#   ./run_collect_20k_chaser_ckpt_optimized.sh --fresh      # Force fresh start (delete old checkpoint)
 # =============================================================================
 
 set -e
@@ -48,10 +51,9 @@ done
 # CONFIGURATION
 # =============================================================================
 
-EXP_NAME="run_20k_caveflyer_ckpt_optimized"
+EXP_NAME="run_20k_chaser_ckpt_optimized"
 
-# From: /root/logs/ppo/meta-rl-caveflyer-easy-step1024-n1k-trial10-gpu1=lr2e4/saved/
-MODEL_CKPT="/root/logs/ppo/meta-rl-caveflyer-easy-step1024-n1k-trial10-gpu1=lr2e4/saved/model_step_195952640.tar"
+MODEL_CKPT="/root/logs/ppo/meta-rl-chaser-easy-step1024-n1k-trial10-gpu1=lr2e4/saved/model_step_128319488.tar"
 
 BASE_OUT_DIR="/root/backup/kinematics/experiments"
 
@@ -71,6 +73,9 @@ MAX_EP_LEN=256             # Max episode length to keep (also used by selector)
 
 DISTRIBUTION_MODE="easy"   # "easy" or "hard"
 REQUIRE_SUCCESS=1          # 1 = only keep successful trajectories
+
+# Chaser-specific: reward can be positive without completion; prefer completion signal.
+SUCCESS_POLICY="prefer_level_complete"  # legacy | prefer_level_complete
 
 # SPEED OPTIMIZATION PARAMS
 BATCH_COMPLETION=0.9       # Don't wait for slowest 10% of envs
@@ -120,7 +125,7 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║ META-RL ROUTE COLLECTION (CaveFlyer) WITH CHECKPOINTING (OPT)║"
+echo "║   META-RL ROUTE COLLECTION (Chaser) WITH CHECKPOINTING (OPT) ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "Experiment:    ${EXP_NAME}"
@@ -131,7 +136,7 @@ echo "Output:        ${ROUTES_NPZ}"
 echo "Started:       $(date)"
 echo ""
 echo "Parameters:"
-echo "  ├── Env:                  caveflyer"
+echo "  ├── Env:                  chaser"
 echo "  ├── Device:               ${DEVICE}"
 echo "  ├── Target trajectories:  ${NUM_TASKS}"
 echo "  ├── Batch size:           ${NUM_PROCESSES}"
@@ -140,6 +145,7 @@ echo "  ├── Record episodes:      ${RECORD_EPISODES}"
 echo "  ├── Max steps/episode:    ${MAX_STEPS}"
 echo "  ├── Max episode length:   ${MAX_EP_LEN}"
 echo "  ├── Require success:      ${REQUIRE_SUCCESS}"
+echo "  ├── Success policy:       ${SUCCESS_POLICY}"
 echo "  └── Distribution mode:    ${DISTRIBUTION_MODE}"
 echo ""
 echo "Perf:"
@@ -155,9 +161,6 @@ echo "  ├── Batch completion:     ${BATCH_COMPLETION} (don't wait for slow
 echo "  ├── Task timeout:         ${TASK_TIMEOUT} (0=auto)"
 echo "  └── Early abort:          ${EARLY_ABORT} (abort failed tasks)"
 echo ""
-echo "Success policy:"
-echo "  └── prefer_level_complete (avoid treating target rewards as 'success')"
-echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -168,7 +171,7 @@ echo ""
 COLLECT_START=$(date +%s)
 
 python -W ignore eval/collect_meta_routes_optimized.py \
-    --env_name caveflyer \
+    --env_name chaser \
     --model_ckpt="${MODEL_CKPT}" \
     --out_npz="${ROUTES_NPZ}" \
     --device="${DEVICE}" \
@@ -181,7 +184,7 @@ python -W ignore eval/collect_meta_routes_optimized.py \
     --max_ep_len=${MAX_EP_LEN} \
     --distribution_mode=${DISTRIBUTION_MODE} \
     --require_success=${REQUIRE_SUCCESS} \
-    --success_policy="prefer_level_complete" \
+    --success_policy="${SUCCESS_POLICY}" \
     --batch_completion_threshold=${BATCH_COMPLETION} \
     --task_timeout=${TASK_TIMEOUT} \
     --early_abort=${EARLY_ABORT} \
@@ -223,13 +226,12 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "Next steps:"
-echo "  1. Run analysis: ./run_analysis_20k_caveflyer_ckpt_optimized.sh"
+echo "  1. Run analysis: ./run_analysis_20k_chaser_ckpt_optimized.sh"
 echo ""
 echo "  Or if collection was interrupted, you can:"
 echo "  2. Check progress:    python eval/routes_ckpt_tools.py info --ckpt_dir ${CKPT_DIR}"
 echo "  3. Export partial:    python eval/routes_ckpt_tools.py build --ckpt_dir ${CKPT_DIR} --out_npz ${DATA_DIR}/routes_partial.npz"
-echo "  4. Run on partial:    ./run_analysis_20k_caveflyer_ckpt_optimized.sh --use-partial"
-echo "  5. Resume collection: ./run_collect_20k_caveflyer_ckpt_optimized.sh"
+echo "  4. Resume collection: ./run_collect_20k_chaser_ckpt_optimized.sh"
 echo ""
 
 

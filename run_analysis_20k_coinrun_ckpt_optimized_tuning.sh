@@ -61,7 +61,7 @@ done
 COLLECT_EXP_NAME="run_20k_coinrun_ckpt_optimized"
 
 # Output experiment name (analysis outputs go under BASE_OUT_DIR/EXP_NAME/)
-EXP_NAME="run_20k_coinrun_ckpt_optimized_analysis_h20_rt5"
+EXP_NAME="run_20k_coinrun_ckpt_optimized_analysis_h20_w20"
 
 # Model checkpoint (same as collection)
 MODEL_CKPT="/root/logs/ppo/meta-rl-coinrun-easy-step1024-n1k-trial10-gpu0=lr2e4/saved/model_step_132775936.tar"
@@ -80,7 +80,7 @@ COLLECTION_TAG="CoinRun 20k with checkpointing (optimized collector)"
 # =============================================================================
 
 NUM_H0=20               # Number of random h0 to sample per route
-WARMUP_PERIODS=8        # Periods to warmup
+WARMUP_PERIODS=20        # Periods to warmup
 SAMPLE_PERIODS=2        # Periods to check convergence
 AC_MATCH_THRESH=0.5     # Action consistency threshold (0.5 = 50% match)
 SEED=42                 # Random seed
@@ -113,7 +113,7 @@ TEST_FRAC="0.2"         # Held-out fraction for reporting test correlations
 RIDGE_NORM="global"               # global | per_episode
 GRID_UNIT_ESTIMATOR="axis_mode"   # axis_mode | median_euclid
 GLOBAL_SCALE_QUANTILE="0.95"
-GLOBAL_TARGET_RADIUS="5.0"
+GLOBAL_TARGET_RADIUS="9.0"
 RIDGE_RADIUS_SCALE="0.8"
 RIDGE_AGGREGATE="max"             # max | sum
 RIDGE_NORMALIZE_PATH="false"      # true | false
