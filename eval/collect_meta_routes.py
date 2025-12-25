@@ -19,6 +19,8 @@ import sys
 
 # Suppress warnings BEFORE importing gym/numpy (must be at top)
 import warnings
+import contextlib
+import io
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*gym.*")
@@ -26,6 +28,7 @@ warnings.filterwarnings("ignore", message=".*gymnasium.*")
 warnings.filterwarnings("ignore", message=".*minigrid.*")
 warnings.filterwarnings("ignore", message=".*np.bool8.*")
 
+os.environ.setdefault("GYM_DISABLE_WARNINGS", "1")  # best-effort (Gym may ignore)
 os.environ["GYM_LOGGER_LEVEL"] = "error"
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 os.environ["PYTHONWARNINGS"] = "ignore"  # Suppress warnings in subprocesses too
@@ -49,10 +52,17 @@ torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-# Suppress gym warnings
+# Suppress gym warnings + gym's noisy startup banner (printed to stderr in some versions)
+_gym_import_stderr = io.StringIO()
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    import gym
+    try:
+        with contextlib.redirect_stderr(_gym_import_stderr):
+            import gym
+    except Exception:
+        # If gym import genuinely fails, replay captured stderr so the error is visible.
+        sys.stderr.write(_gym_import_stderr.getvalue())
+        raise
     gym.logger.set_level(40)
 
 from tqdm import tqdm
@@ -64,11 +74,42 @@ PROJECT_ROOT = os.path.abspath(os.path.join(THIS_DIR, ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+# Import checkpoint storage (optional)
+try:
+    from routes_ckpt_storage import (
+        CheckpointManifest,
+        RoutesShardWriter,
+        build_routes_npz_from_ckpt,
+    )
+    CKPT_AVAILABLE = True
+except ImportError:
+    CKPT_AVAILABLE = False
+
 from baselines.common.vec_env import SubprocVecEnv, VecExtractDictObs, VecMonitor
 from level_replay.envs import VecNormalize, VecPyTorchProcgen
 from level_replay.model import Policy, SimplePolicy
 
-# XY helpers
+# =============================================================================
+# Procgen state helpers (XY + extra state features)
+#
+# Why:
+# - Procgen CoinRun 的 `info` 基本不提供 player 的 (x,y)/(vx,vy) 等可直接用作
+#   behavior embedding 的状态量；但 procgen 的 gym3 环境支持 `callmethod("get_state")`
+#   返回可序列化的 state bytes。
+# - 这些 bytes 的格式在多个 procgen 游戏间是“相当通用”的：包含一个 entity 列表 `ents`，
+#   其中 `ents[0]` 在 Maze/CoinRun 中都对应 agent/player（我们在实践中验证 CoinRun 可解析）。
+#
+# What we extract (per step):
+# - **xy**: (x,y) from ents[0]  -> used as behavior trajectory for ridge embedding / CCA.
+# - **player_v**: (vx,vy) from ents[0] (if present) -> 目前未被 CCA 使用，但可用于后续行为特征。
+# - **nearest_ents**: K nearest entities around player as [dx, dy, type, image_type]
+#   -> 目前未被 CCA 使用，但可用于后续行为特征（例如“离危险/奖励有多近”）。
+#
+# Where used in pipeline:
+# - PKD sampler (`analysis/pkd_cycle_sampler.py`): uses ONLY routes_obs + routes_actions
+#   to sample hidden-state limit cycles. It does NOT use routes_xy / extra state.
+# - CCA alignment (`analysis/cca_alignment.py`): uses routes_xy (behavior) + cycles_hidden (neural).
+# =============================================================================
 PROCGEN_TOOLS_PATH = "/root/test/procgen-tools-main"
 if PROCGEN_TOOLS_PATH not in sys.path:
     sys.path.append(PROCGEN_TOOLS_PATH)
@@ -83,34 +124,145 @@ except ImportError:
     pass
 
 try:
-    from procgen_tools import maze as maze_tools
+    # NOTE: Despite the module name, `procgen_tools.maze.EnvState` parses the
+    # common procgen `get_state()` byte format for multiple games (incl. coinrun).
+    from procgen_tools import maze as procgen_state_tools
 except Exception as e:
-    print(f"Warning: Could not import procgen_tools.maze: {e}")
-    maze_tools = None
+    print(f"Warning: Could not import procgen_tools.maze (state parser): {e}")
+    procgen_state_tools = None
+
+
+def _unwrap_to_gym3_like(env):
+    """Unwrap until we find an object exposing `callmethod` (gym3 env wrapper)."""
+    inner = env
+    for _ in range(64):
+        if hasattr(inner, "callmethod"):
+            return inner
+        if hasattr(inner, "env"):
+            inner = inner.env
+        else:
+            break
+    return inner
+
+
+def extract_procgen_state_from_gym_env(env) -> Optional[Dict[str, Any]]:
+    """
+    Return parsed procgen `state_vals` dict from a gym-wrapped procgen env.
+    Works for Maze and CoinRun (and typically other procgen envs) as long as
+    `get_state()` is available and the procgen-tools parser is importable.
+    """
+    if procgen_state_tools is None:
+        return None
+    try:
+        inner = _unwrap_to_gym3_like(env)
+        if not hasattr(inner, "callmethod"):
+            return None
+        state_bytes_list = inner.callmethod("get_state")
+        if not state_bytes_list:
+            return None
+        state = procgen_state_tools.EnvState(state_bytes_list[0])
+        return state.state_vals
+    except Exception:
+        return None
 
 
 def extract_xy_from_gym_env(env) -> Tuple[float, float]:
-    """Extract (x, y) from a gym-wrapped procgen maze env."""
-    if maze_tools is None:
+    """
+    Extract (x, y) from a gym-wrapped procgen env (maze/coinrun/etc).
+
+    Semantics:
+    - Maze: ents[0] corresponds to the mouse/agent. xy is in procgen world coords.
+    - CoinRun: ents[0] corresponds to the player. xy is in procgen world coords.
+
+    This `xy` is what we save as routes_xy and later feed into ridge embedding.
+    """
+    vals = extract_procgen_state_from_gym_env(env)
+    if vals is None:
         return (float("nan"), float("nan"))
-    
     try:
-        inner = env
-        while hasattr(inner, "env"):
-            if hasattr(inner, "callmethod"):
-                break
-            inner = inner.env
-        
-        if hasattr(inner, "callmethod"):
-            state_bytes_list = inner.callmethod("get_state")
-            state = maze_tools.EnvState(state_bytes_list[0])
-            vals = state.state_vals
-            ents = vals["ents"][0]
-            return (float(ents['x'].val), float(ents['y'].val))
-        
-        return (float("nan"), float("nan"))
+        ents0 = vals["ents"][0]
+        return (float(ents0["x"].val), float(ents0["y"].val))
     except Exception:
         return (float("nan"), float("nan"))
+
+
+def extract_xy_from_state_vals(vals: Optional[Dict[str, Any]]) -> Tuple[float, float]:
+    """Extract (x,y) directly from already-parsed `state_vals`."""
+    if vals is None:
+        return (float("nan"), float("nan"))
+    try:
+        ents0 = vals["ents"][0]
+        return (float(ents0["x"].val), float(ents0["y"].val))
+    except Exception:
+        return (float("nan"), float("nan"))
+
+
+def _extract_step_state_features(vals: Optional[Dict[str, Any]], k_nearest: int = 8) -> Dict[str, Any]:
+    """
+    Extract a small, fixed-shape set of state features from `state_vals`.
+
+    We intentionally keep this generic (no hard-coded CoinRun entity-type mapping)
+    so it remains usable across procgen games.
+
+    Output keys (per-step):
+    - player_v: float32 (2,) = [vx, vy] for ents[0] (nan if missing)
+    - ents_count: int
+    - nearest_ents: float32 (K,4) rows = [dx, dy, type, image_type]
+    """
+    out: Dict[str, Any] = {}
+
+    if vals is None:
+        out["player_v"] = np.asarray([np.nan, np.nan], dtype=np.float32)
+        out["ents_count"] = int(0)
+        out["nearest_ents"] = np.full((k_nearest, 4), np.nan, dtype=np.float32)
+        return out
+
+    try:
+        ents = vals.get("ents", [])
+        out["ents_count"] = int(len(ents))
+        if len(ents) == 0:
+            out["player_v"] = np.asarray([np.nan, np.nan], dtype=np.float32)
+            out["nearest_ents"] = np.full((k_nearest, 4), np.nan, dtype=np.float32)
+            return out
+
+        e0 = ents[0]
+        px = float(e0["x"].val)
+        py = float(e0["y"].val)
+        pvx = float(e0["vx"].val) if "vx" in e0 else float("nan")
+        pvy = float(e0["vy"].val) if "vy" in e0 else float("nan")
+        out["player_v"] = np.asarray([pvx, pvy], dtype=np.float32)
+
+        # Nearest other entities by Euclidean distance.
+        # Each row: [dx, dy, type, image_type]
+        rows = []
+        for j in range(1, len(ents)):
+            ej = ents[j]
+            try:
+                ex = float(ej["x"].val)
+                ey = float(ej["y"].val)
+                dx = ex - px
+                dy = ey - py
+                typ = float(ej["type"].val) if "type" in ej else float("nan")
+                img = float(ej["image_type"].val) if "image_type" in ej else float("nan")
+                d2 = dx * dx + dy * dy
+                rows.append((d2, dx, dy, typ, img))
+            except Exception:
+                continue
+        rows.sort(key=lambda r: r[0])
+        nearest = np.full((k_nearest, 4), np.nan, dtype=np.float32)
+        for idx, r in enumerate(rows[:k_nearest]):
+            _, dx, dy, typ, img = r
+            nearest[idx, 0] = dx
+            nearest[idx, 1] = dy
+            nearest[idx, 2] = typ
+            nearest[idx, 3] = img
+        out["nearest_ents"] = nearest
+        return out
+    except Exception:
+        out["player_v"] = np.asarray([np.nan, np.nan], dtype=np.float32)
+        out["ents_count"] = int(0)
+        out["nearest_ents"] = np.full((k_nearest, 4), np.nan, dtype=np.float32)
+        return out
 
 
 class XYInfoWrapper(gym.Wrapper):
@@ -122,14 +274,18 @@ class XYInfoWrapper(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)
         self._last_xy = (float("nan"), float("nan"))
+        self._last_state_feats: Dict[str, Any] = {}
     
     def reset(self, **kwargs):
         obs = self.env.reset(**kwargs)
-        self._last_xy = extract_xy_from_gym_env(self.env)
+        vals = extract_procgen_state_from_gym_env(self.env)
+        self._last_xy = extract_xy_from_state_vals(vals)
+        self._last_state_feats = _extract_step_state_features(vals)
         return obs
     
     def step(self, action):
         xy_before = self._last_xy
+        feats_before = self._last_state_feats
         obs, reward, done, info = self.env.step(action)
         
         if info is None:
@@ -137,14 +293,35 @@ class XYInfoWrapper(gym.Wrapper):
         
         if done:
             info["terminal_xy"] = xy_before
-            xy_after_reset = extract_xy_from_gym_env(self.env)
+            info["terminal_player_v"] = feats_before.get("player_v", np.asarray([np.nan, np.nan], dtype=np.float32))
+            info["terminal_ents_count"] = int(feats_before.get("ents_count", 0))
+            info["terminal_nearest_ents"] = feats_before.get("nearest_ents", np.full((8, 4), np.nan, dtype=np.float32))
+            vals_after_reset = extract_procgen_state_from_gym_env(self.env)
+            xy_after_reset = extract_xy_from_state_vals(vals_after_reset)
             info["xy"] = xy_after_reset
             self._last_xy = xy_after_reset
+
+            # after auto-reset, refresh state features to match new episode start
+            feats_after_reset = _extract_step_state_features(vals_after_reset)
+            info["player_v"] = feats_after_reset["player_v"]
+            info["ents_count"] = feats_after_reset["ents_count"]
+            info["nearest_ents"] = feats_after_reset["nearest_ents"]
+            self._last_state_feats = feats_after_reset
         else:
-            xy = extract_xy_from_gym_env(self.env)
+            vals = extract_procgen_state_from_gym_env(self.env)
+            feats = _extract_step_state_features(vals)
+            xy = extract_xy_from_state_vals(vals)
             self._last_xy = xy
             info["xy"] = xy
             info["terminal_xy"] = None
+
+            info["player_v"] = feats["player_v"]
+            info["ents_count"] = feats["ents_count"]
+            info["nearest_ents"] = feats["nearest_ents"]
+            info["terminal_player_v"] = None
+            info["terminal_ents_count"] = None
+            info["terminal_nearest_ents"] = None
+            self._last_state_feats = feats
         
         return obs, reward, done, info
     
@@ -192,6 +369,12 @@ class EpisodeBuffer:
     actions: List[int] = field(default_factory=list)
     rewards: List[float] = field(default_factory=list)
     xy: List[np.ndarray] = field(default_factory=list)
+    # Extra state features (primarily useful for CoinRun; optional for Maze)
+    # NOTE: These are collected per-step and saved into the routes .npz, but are
+    # NOT required by PKD sampler or the current CCA pipeline.
+    player_v: List[np.ndarray] = field(default_factory=list)
+    ents_count: List[int] = field(default_factory=list)
+    nearest_ents: List[np.ndarray] = field(default_factory=list)  # (K,4)
     info_level_complete: bool = False
     ret: float = 0.0
     length: int = 0
@@ -209,12 +392,32 @@ class EpisodeBuffer:
             obs_arr = np.stack(self.obs, axis=0)
         else:
             obs_arr = np.empty((0, 3, 64, 64), dtype=np.float16)
+
+        if self.player_v:
+            player_v_arr = np.stack(self.player_v, axis=0).astype(np.float32)
+        else:
+            player_v_arr = np.empty((0, 2), dtype=np.float32)
+
+        if self.ents_count:
+            ents_count_arr = np.asarray(self.ents_count, dtype=np.int32)
+        else:
+            ents_count_arr = np.empty((0,), dtype=np.int32)
+
+        if self.nearest_ents:
+            nearest_ents_arr = np.stack(self.nearest_ents, axis=0).astype(np.float32)
+        else:
+            nearest_ents_arr = np.empty((0, 8, 4), dtype=np.float32)
         
         return {
             "obs": obs_arr,
             "actions": np.array(self.actions, dtype=np.int64),
             "rewards": np.array(self.rewards, dtype=np.float32),
             "xy": xy_arr,
+            # --- Optional extra state ---
+            # Saved for future behavior features/debugging; not used by current PKD/CCA.
+            "player_v": player_v_arr,
+            "ents_count": ents_count_arr,
+            "nearest_ents": nearest_ents_arr,
             "success": bool(self.info_level_complete or (self.ret > 0)),
             "level_complete": bool(self.info_level_complete),
             "return": float(self.ret),
@@ -485,6 +688,39 @@ def run_batch_collection(
                 ep_bufs[i].xy_missing_count += 1
             
             ep_bufs[i].xy.append(np.asarray([xy[0], xy[1]], dtype=np.float32))
+
+            # Extra procgen state features (generic across games; used esp. for CoinRun)
+            if isinstance(info_i, dict):
+                if done_np[i]:
+                    pv = info_i.get("terminal_player_v", None)
+                    ec = info_i.get("terminal_ents_count", None)
+                    ne = info_i.get("terminal_nearest_ents", None)
+                else:
+                    pv = info_i.get("player_v", None)
+                    ec = info_i.get("ents_count", None)
+                    ne = info_i.get("nearest_ents", None)
+            else:
+                pv, ec, ne = None, None, None
+
+            if pv is None:
+                pv_arr = np.asarray([np.nan, np.nan], dtype=np.float32)
+            else:
+                pv_arr = np.asarray(pv, dtype=np.float32).reshape(2,)
+            if ec is None:
+                ec_i = 0
+            else:
+                try:
+                    ec_i = int(ec)
+                except Exception:
+                    ec_i = 0
+            if ne is None:
+                ne_arr = np.full((8, 4), np.nan, dtype=np.float32)
+            else:
+                ne_arr = np.asarray(ne, dtype=np.float32).reshape(8, 4)
+
+            ep_bufs[i].player_v.append(pv_arr)
+            ep_bufs[i].ents_count.append(ec_i)
+            ep_bufs[i].nearest_ents.append(ne_arr)
             
             # OPTIMIZATION 2: Per-task timeout
             if task_total_steps[i] >= task_timeout_steps:
@@ -671,6 +907,18 @@ def main():
     p.add_argument("--use_compile", type=int, default=1)
     p.add_argument("--use_amp", type=int, default=1)
 
+    # Checkpointing (optional)
+    p.add_argument("--ckpt_dir", type=str, default=None,
+                   help="Enable checkpointing: directory to store shards (default: disabled)")
+    p.add_argument("--resume", action="store_true",
+                   help="Resume from checkpoint if manifest exists")
+    p.add_argument("--resume_force", action="store_true",
+                   help="Resume even if config differs (use with caution)")
+    p.add_argument("--ckpt_shard_size", type=int, default=25,
+                   help="Flush shard when buffer reaches this many routes")
+    p.add_argument("--ckpt_flush_secs", type=float, default=60.0,
+                   help="Flush shard after this many seconds even if buffer not full")
+
     args = p.parse_args()
 
     # Legacy mapping
@@ -688,6 +936,67 @@ def main():
     
     if args.task_timeout <= 0:
         args.task_timeout = args.max_steps * (args.adapt_episodes + args.record_episodes)
+
+    # Checkpoint setup
+    use_ckpt = args.ckpt_dir is not None
+    if use_ckpt and not CKPT_AVAILABLE:
+        raise RuntimeError("Checkpointing requested but routes_ckpt_storage not available")
+    
+    ckpt_writer = None
+    manifest = None
+    if use_ckpt:
+        # Load or create manifest
+        manifest = CheckpointManifest.load(args.ckpt_dir)
+        if manifest is None:
+            # New checkpoint
+            manifest = CheckpointManifest()
+            manifest.created_at = time.time()
+            manifest.num_tasks_target = args.num_tasks
+            manifest.env_name = args.env_name
+            manifest.model_ckpt = args.model_ckpt
+            manifest.distribution_mode = args.distribution_mode
+            manifest.max_steps = args.max_steps
+            manifest.max_ep_len = args.max_ep_len
+            manifest.require_success = args.require_success
+            manifest.adapt_episodes = args.adapt_episodes
+            manifest.record_episodes = args.record_episodes
+            manifest.out_npz = args.out_npz
+            manifest.current_seed = args.seed_offset
+            manifest.save(args.ckpt_dir)
+        elif args.resume:
+            # Resume: validate config
+            is_valid, error_msg = manifest.validate_resume(args)
+            if not is_valid:
+                if args.resume_force:
+                    print(f"[WARNING] Config mismatch (--resume_force):\n{error_msg}")
+                else:
+                    raise ValueError(
+                        f"Cannot resume: {error_msg}\n"
+                        "Use --resume_force to override (may cause issues)"
+                    )
+            # Update target if changed
+            manifest.num_tasks_target = args.num_tasks
+            manifest.out_npz = args.out_npz
+            manifest.save(args.ckpt_dir)
+        else:
+            raise ValueError(
+                f"Checkpoint directory exists but --resume not specified: {args.ckpt_dir}\n"
+                "Use --resume to continue, or delete/rename the directory to start fresh"
+            )
+        
+        # Create shard writer
+        ckpt_writer = RoutesShardWriter(
+            args.ckpt_dir,
+            shard_size=args.ckpt_shard_size,
+            flush_secs=args.ckpt_flush_secs,
+            manifest=manifest,
+        )
+        
+        if args.resume:
+            print(f"[resume] Continuing from checkpoint:")
+            print(f"  Collected: {manifest.num_tasks_collected}/{manifest.num_tasks_target}")
+            print(f"  Current seed: {manifest.current_seed}")
+            print(f"  Seeds attempted: {manifest.seeds_attempted}")
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     
@@ -722,9 +1031,18 @@ def main():
             torch.cuda.synchronize()
 
     # Output containers
+    #
+    # routes_*.npz contract (high-level):
+    # - routes_obs/actions: used by PKD sampler to compute hidden-state cycles.
+    # - routes_xy: used by ridge embedding / CCA alignment as "behavior trajectory".
+    # - routes_player_v/routes_ents_count/routes_nearest_ents: optional extra state
+    #   (currently NOT used by PKD sampler nor cca_alignment.py).
     routes_obs: List[np.ndarray] = []
     routes_actions: List[np.ndarray] = []
     routes_xy: List[np.ndarray] = []
+    routes_player_v: List[np.ndarray] = []
+    routes_ents_count: List[np.ndarray] = []
+    routes_nearest_ents: List[np.ndarray] = []
     routes_rewards: List[np.ndarray] = []
     routes_ep_len: List[int] = []
     routes_return: List[float] = []
@@ -734,9 +1052,16 @@ def main():
     routes_diag: List[Dict[str, Any]] = []
     all_episodes: List[List[Dict[str, Any]]] = []
 
-    # Seed generator
-    current_seed = args.seed_offset
-    seeds_tried = 0
+    # Seed generator (resume from checkpoint if available)
+    if use_ckpt and manifest and args.resume:
+        current_seed = manifest.current_seed
+        seeds_tried = manifest.seeds_attempted
+        # Adjust progress bar
+        initial_collected = manifest.num_tasks_collected
+    else:
+        current_seed = args.seed_offset
+        seeds_tried = 0
+        initial_collected = 0
     
     # Live stats
     live_stats = LiveStats(args.num_tasks)
@@ -744,6 +1069,7 @@ def main():
     # Progress bar
     pbar = tqdm(
         total=args.num_tasks,
+        initial=initial_collected,
         desc=live_stats.get_desc(),
         unit="traj",
         ncols=120,
@@ -753,7 +1079,17 @@ def main():
     )
     
     # Collection loop
-    while len(routes_seed) < args.num_tasks and seeds_tried < args.max_seed_attempts:
+    while True:
+        # Check completion conditions
+        if use_ckpt:
+            current_collected = manifest.num_tasks_collected
+        else:
+            current_collected = len(routes_seed)
+        
+        if current_collected >= args.num_tasks:
+            break
+        if seeds_tried >= args.max_seed_attempts:
+            break
         # Generate batch of seeds
         batch_size = min(args.num_processes, args.max_seed_attempts - seeds_tried)
         batch_seeds = list(range(current_seed, current_seed + batch_size))
@@ -811,25 +1147,55 @@ def main():
                 continue
             
             # Save successful trajectory
-            routes_seed.append(int(seed))
-            routes_selected_ep.append(int(sel_idx))
-            routes_obs.append(ep["obs"])
-            routes_actions.append(ep["actions"])
-            routes_xy.append(ep["xy"])
-            routes_rewards.append(ep["rewards"])
-            routes_ep_len.append(int(ep["len"]))
-            routes_return.append(float(ep["return"]))
-            routes_success.append(bool(ep["success"]))
-            routes_diag.append(diag)
-            
-            if args.save_all_episodes:
-                all_episodes.append(episodes)
+            if use_ckpt:
+                # Write to checkpoint shard
+                ckpt_writer.append_route(
+                    seed=int(seed),
+                    selected_ep=int(sel_idx),
+                    obs=ep["obs"],
+                    actions=ep["actions"],
+                    xy=ep["xy"],
+                    player_v=ep.get("player_v", np.empty((0, 2), dtype=np.float32)),
+                    ents_count=ep.get("ents_count", np.empty((0,), dtype=np.int32)),
+                    nearest_ents=ep.get("nearest_ents", np.empty((0, 8, 4), dtype=np.float32)),
+                    rewards=ep["rewards"],
+                    ep_len=int(ep["len"]),
+                    ep_return=float(ep["return"]),
+                    success=bool(ep["success"]),
+                    diag=diag,
+                    all_episodes=episodes if args.save_all_episodes else None,
+                )
+                # Update progress in manifest
+                ckpt_writer.update_progress(current_seed, seeds_tried)
+            else:
+                # Original in-memory storage
+                routes_seed.append(int(seed))
+                routes_selected_ep.append(int(sel_idx))
+                routes_obs.append(ep["obs"])
+                routes_actions.append(ep["actions"])
+                routes_xy.append(ep["xy"])
+                routes_player_v.append(ep.get("player_v", np.empty((0, 2), dtype=np.float32)))
+                routes_ents_count.append(ep.get("ents_count", np.empty((0,), dtype=np.int32)))
+                routes_nearest_ents.append(ep.get("nearest_ents", np.empty((0, 8, 4), dtype=np.float32)))
+                routes_rewards.append(ep["rewards"])
+                routes_ep_len.append(int(ep["len"]))
+                routes_return.append(float(ep["return"]))
+                routes_success.append(bool(ep["success"]))
+                routes_diag.append(diag)
+                
+                if args.save_all_episodes:
+                    all_episodes.append(episodes)
             
             batch_successful += 1
             pbar.update(1)
             
-            if len(routes_seed) >= args.num_tasks:
-                break
+            # Check if we've reached target
+            if use_ckpt:
+                if manifest.num_tasks_collected >= args.num_tasks:
+                    break
+            else:
+                if len(routes_seed) >= args.num_tasks:
+                    break
         
         # Update live stats
         live_stats.update(
@@ -848,12 +1214,19 @@ def main():
     
     pbar.close()
     
+    # Flush any remaining buffered routes
+    if use_ckpt:
+        ckpt_writer.close()
+        final_collected = manifest.num_tasks_collected
+    else:
+        final_collected = len(routes_seed)
+    
     # Final stats
     print("\n" + "="*60)
     print("COLLECTION COMPLETE")
     print("="*60)
     print(f"Target:            {args.num_tasks}")
-    print(f"Collected:         {len(routes_seed)}")
+    print(f"Collected:         {final_collected}")
     print(f"Seeds attempted:   {seeds_tried}")
     print(f"Success rate:      {100*live_stats.success_rate:.1f}%")
     print(f"Total time:        {live_stats.format_time(live_stats.elapsed)}")
@@ -862,62 +1235,75 @@ def main():
     print(f"  Early aborted:   {live_stats.aborted}")
     print(f"  Timed out:       {live_stats.timed_out}")
     
-    # Diversity check
-    unique_seeds = len(set(routes_seed))
-    print(f"\n[Diversity]")
-    print(f"  Unique seeds:    {unique_seeds} / {len(routes_seed)} ({100*unique_seeds/max(1,len(routes_seed)):.1f}%)")
-    
-    # Length stats
-    if routes_ep_len:
-        lens = np.array(routes_ep_len)
-        print(f"\n[Episode Lengths]")
-        print(f"  Min: {lens.min()}, Max: {lens.max()}, Mean: {lens.mean():.1f}, Median: {np.median(lens):.0f}")
+    # Diversity and length stats (only if not using ckpt, or load from merged file)
+    if not use_ckpt:
+        unique_seeds = len(set(routes_seed))
+        print(f"\n[Diversity]")
+        print(f"  Unique seeds:    {unique_seeds} / {len(routes_seed)} ({100*unique_seeds/max(1,len(routes_seed)):.1f}%)")
+        
+        # Length stats
+        if routes_ep_len:
+            lens = np.array(routes_ep_len)
+            print(f"\n[Episode Lengths]")
+            print(f"  Min: {lens.min()}, Max: {lens.max()}, Mean: {lens.mean():.1f}, Median: {np.median(lens):.0f}")
+    else:
+        print(f"\n[Note] Use 'python eval/routes_ckpt_tools.py info --ckpt_dir {args.ckpt_dir}' for detailed stats")
     
     print("="*60)
 
-    # Save
-    os.makedirs(os.path.dirname(args.out_npz) or ".", exist_ok=True)
+    # Save final output
+    if use_ckpt:
+        # Merge shards into final routes.npz
+        print(f"\n[ckpt] Merging shards into {args.out_npz}...")
+        n_merged = build_routes_npz_from_ckpt(args.ckpt_dir, args.out_npz)
+        print(f"[saved] {args.out_npz} ({n_merged} trajectories)")
+    else:
+        # Original save path
+        os.makedirs(os.path.dirname(args.out_npz) or ".", exist_ok=True)
 
-    save_dict = dict(
-        routes_seed=np.asarray(routes_seed, dtype=np.int64),
-        routes_selected_ep=np.asarray(routes_selected_ep, dtype=np.int64),
-        routes_obs=np.asarray(routes_obs, dtype=object),
-        routes_actions=np.asarray(routes_actions, dtype=object),
-        routes_xy=np.asarray(routes_xy, dtype=object),
-        routes_rewards=np.asarray(routes_rewards, dtype=object),
-        routes_ep_len=np.asarray(routes_ep_len, dtype=np.int64),
-        routes_return=np.asarray(routes_return, dtype=np.float32),
-        routes_success=np.asarray(routes_success, dtype=np.bool_),
-        routes_diag=np.asarray(routes_diag, dtype=object),
-        meta=dict(
-            env_name=args.env_name,
-            distribution_mode=args.distribution_mode,
-            num_tasks_target=args.num_tasks,
-            num_tasks_collected=len(routes_seed),
-            seeds_attempted=seeds_tried,
-            success_rate=float(live_stats.success_rate),
-            seed_offset=args.seed_offset,
-            num_processes=args.num_processes,
-            arch=args.arch,
-            hidden_size=args.hidden_size,
-            adapt_episodes=args.adapt_episodes,
-            record_episodes=args.record_episodes,
-            min_len=args.min_len,
-            max_ep_len=args.max_ep_len,
-            max_steps=args.max_steps,
-            require_success=bool(args.require_success),
-            # Speed optimization params
-            batch_completion_threshold=args.batch_completion_threshold,
-            task_timeout=args.task_timeout,
-            early_abort=bool(args.early_abort),
-        ),
-    )
+        save_dict = dict(
+            routes_seed=np.asarray(routes_seed, dtype=np.int64),
+            routes_selected_ep=np.asarray(routes_selected_ep, dtype=np.int64),
+            routes_obs=np.asarray(routes_obs, dtype=object),
+            routes_actions=np.asarray(routes_actions, dtype=object),
+            routes_xy=np.asarray(routes_xy, dtype=object),
+            routes_player_v=np.asarray(routes_player_v, dtype=object),
+            routes_ents_count=np.asarray(routes_ents_count, dtype=object),
+            routes_nearest_ents=np.asarray(routes_nearest_ents, dtype=object),
+            routes_rewards=np.asarray(routes_rewards, dtype=object),
+            routes_ep_len=np.asarray(routes_ep_len, dtype=np.int64),
+            routes_return=np.asarray(routes_return, dtype=np.float32),
+            routes_success=np.asarray(routes_success, dtype=np.bool_),
+            routes_diag=np.asarray(routes_diag, dtype=object),
+            meta=dict(
+                env_name=args.env_name,
+                distribution_mode=args.distribution_mode,
+                num_tasks_target=args.num_tasks,
+                num_tasks_collected=len(routes_seed),
+                seeds_attempted=seeds_tried,
+                success_rate=float(live_stats.success_rate),
+                seed_offset=args.seed_offset,
+                num_processes=args.num_processes,
+                arch=args.arch,
+                hidden_size=args.hidden_size,
+                adapt_episodes=args.adapt_episodes,
+                record_episodes=args.record_episodes,
+                min_len=args.min_len,
+                max_ep_len=args.max_ep_len,
+                max_steps=args.max_steps,
+                require_success=bool(args.require_success),
+                # Speed optimization params
+                batch_completion_threshold=args.batch_completion_threshold,
+                task_timeout=args.task_timeout,
+                early_abort=bool(args.early_abort),
+            ),
+        )
 
-    if args.save_all_episodes:
-        save_dict["episodes_all"] = np.asarray(all_episodes, dtype=object)
+        if args.save_all_episodes:
+            save_dict["episodes_all"] = np.asarray(all_episodes, dtype=object)
 
-    np.savez_compressed(args.out_npz, **save_dict)
-    print(f"\n[saved] {args.out_npz}")
+        np.savez_compressed(args.out_npz, **save_dict)
+        print(f"\n[saved] {args.out_npz}")
 
 
 if __name__ == "__main__":

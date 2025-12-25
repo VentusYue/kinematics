@@ -510,6 +510,24 @@ def main():
     
     print(f"Loading routes from {args.routes_npz}")
     routes_data = np.load(args.routes_npz, allow_pickle=True)
+    # ---------------------------------------------------------------------
+    # Behavior-side inputs (from route collection)
+    #
+    # This script is the "D) CCA 对齐" stage.
+    #
+    # What is used here:
+    # - routes_xy: (T,2) behavior trajectory per route, later converted to ridge embedding (441D).
+    # - routes_ep_len: episode length metadata, used for plotting/coloring diagnostics.
+    #
+    # Semantics of routes_xy:
+    # - Maze: agent(mouse) world coords from procgen `get_state()` entity ents[0].
+    # - CoinRun: player world coords from procgen `get_state()` entity ents[0].
+    #
+    # What is NOT used here (but may exist in routes.npz):
+    # - routes_obs/routes_actions: used earlier by PKD sampler, not needed for CCA step.
+    # - routes_player_v/routes_ents_count/routes_nearest_ents: optional extra state features
+    #   (currently ignored by this CCA script; could be used to build richer behavior embeddings later).
+    # ---------------------------------------------------------------------
     routes_xy = routes_data['routes_xy']
     routes_ep_len = routes_data['routes_ep_len']
     

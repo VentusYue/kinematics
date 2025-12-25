@@ -51,7 +51,7 @@ SOURCE_ROUTES="/root/backup/kinematics/experiments/run_random_seeds_10k_gpuopt_s
 # Output experiment name (analysis outputs go under BASE_OUT_DIR/EXP_NAME/)
 # Picked a new name to avoid collisions with earlier runs and make it obvious
 # which checkpoint the analysis corresponds to.
-EXP_NAME="run_random_seeds_10k_gpuopt_step170196992_analysis_v0_30-100-h50"
+EXP_NAME="run_random_seeds_10k_gpuopt_step170196992_analysis_warmup2_sample1"
 
 # Model checkpoint (same as collection)
 MODEL_CKPT="/root/logs/ppo/meta-rl-maze-easy-n10k-trial10-dense-gpu-opt/model_step_170196992.tar"
@@ -66,17 +66,30 @@ DEVICE="cuda:0"
 # PKD CYCLE SAMPLER PARAMETERS
 # =============================================================================
 
-NUM_H0=50               # Number of random h0 to sample per route
-WARMUP_PERIODS=8        # Periods to warmup
-SAMPLE_PERIODS=2        # Periods to check convergence
+# NUM_H0=20               # Number of random h0 to sample per route
+# WARMUP_PERIODS=8        # Periods to warmup
+# SAMPLE_PERIODS=2        # Periods to check convergence
+# AC_MATCH_THRESH=0.8     # Action consistency threshold (0.8 = 80% match)
+# SEED=42                 # Random seed
+
+# # Length filtering
+# MIN_LENGTH="5"          # Minimum sequence length
+# MAX_LENGTH="50"         # Maximum sequence length
+# PCA_DIM_X=50            # PCA dims for Neural state (X)
+# PCA_DIM_Y=50            # PCA dims for Behavior Ridge (Y)
+
+NUM_H0=20               # Number of random h0 to sample per route
+WARMUP_PERIODS=2        # Periods to warmup
+SAMPLE_PERIODS=4        # Periods to check convergence
 AC_MATCH_THRESH=0.8     # Action consistency threshold (0.8 = 80% match)
 SEED=42                 # Random seed
 
 # Length filtering
-MIN_LENGTH="30"          # Minimum sequence length
-MAX_LENGTH="100"         # Maximum sequence length
+MIN_LENGTH="5"          # Minimum sequence length
+MAX_LENGTH="50"         # Maximum sequence length
 PCA_DIM_X=50            # PCA dims for Neural state (X)
 PCA_DIM_Y=50            # PCA dims for Behavior Ridge (Y)
+
 
 # =============================================================================
 # CCA PARAMETERS

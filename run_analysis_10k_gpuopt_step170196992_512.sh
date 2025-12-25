@@ -2,14 +2,17 @@
 # =============================================================================
 # Meta-RL Behavior-Neural Alignment Analysis Pipeline (10k collection)
 #
+# Target collection:
+#   run_random_seeds_10k_gpuopt_step170196992—attempt-2 (max_steps=512)
+#
 # Runs:
 #   Step 1: PKD Cycle Sampling
 #   Step 2: CCA Alignment Analysis
 #   Step 3: Trajectory Statistics
 #
 # Usage:
-#   ./run_analysis_10k_gpuopt_step170196992.sh              # Run full pipeline
-#   ./run_analysis_10k_gpuopt_step170196992.sh --skip-pkd   # Skip PKD, use existing cycles
+#   ./run_analysis_10k_gpuopt_step170196992_ac50_attempt-2_maxstep512.sh              # Run full pipeline
+#   ./run_analysis_10k_gpuopt_step170196992_ac50_attempt-2_maxstep512.sh --skip-pkd   # Skip PKD, use existing cycles
 # =============================================================================
 
 set -e  # Exit on error
@@ -46,12 +49,10 @@ done
 # =============================================================================
 
 # Source routes (from collection output)
-SOURCE_ROUTES="/root/backup/kinematics/experiments/run_random_seeds_10k_gpuopt_step170196992/data/routes.npz"
+SOURCE_ROUTES="/root/backup/kinematics/experiments/run_random_seeds_10k_gpuopt_step170196992—attempt-2/data/routes.npz"
 
 # Output experiment name (analysis outputs go under BASE_OUT_DIR/EXP_NAME/)
-# Picked a new name to avoid collisions with earlier runs and make it obvious
-# which checkpoint the analysis corresponds to.
-EXP_NAME="run_random_seeds_10k_gpuopt_step170196992_analysis_v0_ac60_new-5-100-h20"
+EXP_NAME="run_random_seeds_10k_gpuopt_step170196992_attempt-2_maxstep512_analysis_v0_warmup10_sample5"
 
 # Model checkpoint (same as collection)
 MODEL_CKPT="/root/logs/ppo/meta-rl-maze-easy-n10k-trial10-dense-gpu-opt/model_step_170196992.tar"
@@ -62,19 +63,22 @@ BASE_OUT_DIR="/root/backup/kinematics/experiments"
 # Device
 DEVICE="cuda:1"
 
+# Target collection tag (for printouts only)
+COLLECTION_TAG="attempt-2 (max_steps=512)"
+
 # =============================================================================
 # PKD CYCLE SAMPLER PARAMETERS
 # =============================================================================
 
 NUM_H0=20               # Number of random h0 to sample per route
-WARMUP_PERIODS=8        # Periods to warmup
-SAMPLE_PERIODS=2        # Periods to check convergence
-AC_MATCH_THRESH=0.6     # Action consistency threshold (0.8 = 80% match)
+WARMUP_PERIODS=10        # Periods to warmup
+SAMPLE_PERIODS=5        # Periods to check convergence
+AC_MATCH_THRESH=0.5     # Action consistency threshold (0.8 = 80% match)
 SEED=42                 # Random seed
 
 # Length filtering
 MIN_LENGTH="5"          # Minimum sequence length
-MAX_LENGTH="128"         # Maximum sequence length
+MAX_LENGTH="256"        # Maximum sequence length
 PCA_DIM_X=50            # PCA dims for Neural state (X)
 PCA_DIM_Y=50            # PCA dims for Behavior Ridge (Y)
 
@@ -89,8 +93,6 @@ TEST_FRAC="0.2"         # Held-out fraction for reporting test correlations
 # -----------------------------------------------------------------------------
 # CCA / Ridge defaults (one-run, no tuning)
 # -----------------------------------------------------------------------------
-# Global normalization (Update B) + a moderate ridge radius_scale that improves
-# ridge diversity without the held-out collapse seen at very small radii.
 RIDGE_NORM="global"               # global | per_episode
 GRID_UNIT_ESTIMATOR="axis_mode"   # axis_mode | median_euclid
 GLOBAL_SCALE_QUANTILE="0.95"
@@ -134,6 +136,7 @@ echo "╔═══════════════════════�
 echo "║         META-RL ALIGNMENT ANALYSIS PIPELINE                  ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
+echo "Collection:    ${COLLECTION_TAG}"
 echo "Experiment:    ${EXP_NAME}"
 echo "Source routes: ${SOURCE_ROUTES}"
 echo "Model:         ${MODEL_CKPT}"
@@ -161,9 +164,12 @@ import numpy as np
 data = np.load('${SOURCE_ROUTES}', allow_pickle=True)
 seeds = data['routes_seed']
 ep_lens = data['routes_ep_len']
+success = data['routes_success'] if 'routes_success' in data.files else None
 print(f'  Trajectories: {len(seeds)}')
 print(f'  Unique seeds: {len(np.unique(seeds))}')
 print(f'  Ep lengths:   min={ep_lens.min()}, max={ep_lens.max()}, mean={ep_lens.mean():.1f}')
+if success is not None:
+    print(f'  Success rate: {100.0*success.mean():.1f}%')
 "
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
@@ -300,6 +306,7 @@ echo "╔═══════════════════════�
 echo "║                    ANALYSIS COMPLETE                         ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
+echo "Collection: ${COLLECTION_TAG}"
 echo "Experiment: ${EXP_NAME}"
 echo "Finished:   $(date)"
 echo ""

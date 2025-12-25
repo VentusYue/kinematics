@@ -11,6 +11,31 @@ import warnings
 from tqdm import tqdm
 from collections import Counter, defaultdict
 
+# =============================================================================
+# PKD cycle sampler: what it consumes vs what it ignores
+#
+# This script is the "B) PKD 采样极限环" stage.
+#
+# Input: routes npz produced by `eval/collect_meta_routes.py`.
+# Typical keys in routes.npz:
+# - routes_obs: object array, each element is (T, C, H, W) float16 frames (CHW).
+# - routes_actions: object array, each element is (T,) int actions.
+# - routes_rewards: object array, each element is (T,) float rewards.
+# - routes_xy: object array, each element is (T,2) float (x,y) trajectory.
+#   - Maze: mouse/agent world coords from procgen state ents[0].
+#   - CoinRun: player world coords from procgen state ents[0].
+# - (optional extra state for CoinRun / generic procgen):
+#   - routes_player_v: (T,2) float (vx,vy) from ents[0]
+#   - routes_ents_count: (T,) int number of entities
+#   - routes_nearest_ents: (T,K,4) float rows [dx,dy,type,image_type]
+#
+# IMPORTANT:
+# - PKD sampler uses ONLY `routes_obs` and `routes_actions`.
+# - It DOES NOT use `routes_xy` or any extra state features.
+# - `routes_xy` is used later in "D) CCA 对齐" (`analysis/cca_alignment.py`) when building
+#   ridge embeddings (behavior) to align with PKD cycles (neural).
+# =============================================================================
+
 # Suppress warnings to improve terminal output
 warnings.filterwarnings("ignore")
 os.environ['GYM_LOGGER_LEVEL'] = 'error'
@@ -214,6 +239,8 @@ def main():
     
     print(f"Loading routes from {local_args.routes_npz}")
     data = np.load(local_args.routes_npz, allow_pickle=True)
+    # NOTE: PKD only needs observation + action sequences.
+    # Behavior/state keys (routes_xy, routes_player_v, ...) are intentionally ignored here.
     routes_obs = data["routes_obs"]
     routes_actions = data["routes_actions"]
 

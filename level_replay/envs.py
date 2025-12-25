@@ -5,10 +5,40 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+import sys
+import warnings
+import contextlib
+import io
 from functools import partial
 from typing import Callable, List, Tuple, Union
 
-import gym
+# -----------------------------------------------------------------------------
+# Silence extremely noisy Gym/Gym-Minigrid startup warnings (esp. with NumPy 2.0)
+#
+# Why this lives here:
+# `SubprocVecEnv` worker processes import this module, so any `import gym` prints
+# (or warnings rendered to stderr) will spam logs N times per batch.
+#
+# We only suppress stderr during `import gym`; if the import fails, we replay the
+# captured stderr so the real error is still visible.
+# -----------------------------------------------------------------------------
+os.environ.setdefault("PYTHONWARNINGS", "ignore")
+os.environ.setdefault("GYM_LOGGER_LEVEL", "error")
+os.environ.setdefault("GYM_DISABLE_WARNINGS", "1")  # best-effort (Gym may ignore)
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*gym_minigrid.*")
+warnings.filterwarnings("ignore", message=".*minigrid.*")
+warnings.filterwarnings("ignore", message=".*Gym has been unmaintained.*")
+
+_gym_import_stderr = io.StringIO()
+try:
+    with contextlib.redirect_stderr(_gym_import_stderr):
+        import gym
+except Exception:
+    sys.stderr.write(_gym_import_stderr.getvalue())
+    raise
 import numpy as np
 import torch
 import wandb

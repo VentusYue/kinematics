@@ -1,0 +1,12 @@
+{
+  "created_at": 1766605408.4777627,
+  "current_seed": 0,
+  "env_name": "fake",
+  "num_tasks_collected": 0,
+  "num_tasks_target": 10,
+  "out_npz": "/root/backup/kinematics/_tmp_ckpt_validation/routes_exported.npz",
+  "seeds_attempted": 0,
+  "shards_written": 0,
+  "storage_format": "ckpt_shards_v1",
+  "updated_at": 1766605408.4777632
+}
