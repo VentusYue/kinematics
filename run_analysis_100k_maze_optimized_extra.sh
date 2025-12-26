@@ -1,27 +1,27 @@
 #!/bin/bash
 # =============================================================================
-# Meta-RL Behavior-Neural Alignment Analysis Pipeline (100k collection)
+# Meta-RL Behavior-Neural Alignment Analysis Pipeline (100k Maze) — EXTRA (skip PKD)
 #
-# Target collection:
-#   run_optimized_100k_maze_collect
+# IMPORTANT:
+# - Defaults to skipping PKD and re-running CCA + stats in-place.
+# - SKIP_PKD only works if EXP_NAME matches the existing analysis folder that
+#   already contains data/pkd_cycles.npz.
 #
-# Runs:
-#   Step 1: PKD Cycle Sampling
-#   Step 2: CCA Alignment Analysis
-#   Step 3: Trajectory Statistics
+# Source of truth for params: experiment log
+#   /root/backup/kinematics/experiments/run_optimized_100k_maze_collect_analysis/logs/analysis.log
 #
 # Usage:
-#   ./run_analysis_100k_maze_optimized.sh              # Run full pipeline
-#   ./run_analysis_100k_maze_optimized.sh --skip-pkd   # Skip PKD, use existing cycles
+#   ./run_analysis_100k_maze_optimized_extra.sh          # default: skip PKD
+#   ./run_analysis_100k_maze_optimized_extra.sh --run-pkd  # recompute PKD then CCA+stats
 # =============================================================================
 
-set -e  # Exit on error
+set -e
 
 # =============================================================================
 # COMMAND-LINE ARGUMENTS
 # =============================================================================
 
-SKIP_PKD=false
+SKIP_PKD=true
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -29,11 +29,16 @@ while [[ $# -gt 0 ]]; do
             SKIP_PKD=true
             shift
             ;;
+        --run-pkd)
+            SKIP_PKD=false
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --skip-pkd    Skip PKD Cycle Sampling, use existing pkd_cycles.npz"
+            echo "  --skip-pkd    Skip PKD Cycle Sampling (default)"
+            echo "  --run-pkd     Run PKD Cycle Sampling (overrides default)"
             echo "  -h, --help    Show this help message"
             exit 0
             ;;
@@ -45,62 +50,41 @@ while [[ $# -gt 0 ]]; do
 done
 
 # =============================================================================
-# CONFIGURATION - MODIFY THESE
+# CONFIGURATION (from analysis.log)
 # =============================================================================
 
-# Source routes (from collection output)
 SOURCE_ROUTES="/root/backup/kinematics/experiments/run_optimized_100k_maze_collect/data/routes.npz"
-
-# Output experiment name (analysis outputs go under BASE_OUT_DIR/EXP_NAME/)
-EXP_NAME="run_optimized_100k_maze_collect_analysis_ac80"
-
-# Model checkpoint (same as collection)
-# Verified from logs/collection.log
+EXP_NAME="run_optimized_100k_maze_collect_analysis"  # must match existing folder for --skip-pkd
 MODEL_CKPT="/root/logs/ppo/meta-rl-maze-easy-n10k-trial10-dense-gpu-opt/model_step_170196992.tar"
-
-# Base output directory
 BASE_OUT_DIR="/root/backup/kinematics/experiments"
-
-# Device
 DEVICE="cuda:0"
 
-# Target collection tag (for printouts only)
-COLLECTION_TAG="run_optimized_100k_maze_collect"
-
 # =============================================================================
-# PKD CYCLE SAMPLER PARAMETERS
+# PKD CYCLE SAMPLER PARAMETERS (from analysis.log)
 # =============================================================================
 
-NUM_H0=20               # Number of random h0 to sample per route
-WARMUP_PERIODS=8       # Periods to warmup
-SAMPLE_PERIODS=2        # Periods to check convergence
-AC_MATCH_THRESH=0.8     # Action consistency threshold (0.8 = 80% match)
-SEED=42                 # Random seed
-
-# Length filtering
-MIN_LENGTH="5"          # Minimum sequence length
-MAX_LENGTH="256"        # Maximum sequence length
-PCA_DIM_X=50            # PCA dims for Neural state (X)
-PCA_DIM_Y=50            # PCA dims for Behavior Ridge (Y)
+NUM_H0=20
+WARMUP_PERIODS=8
+SAMPLE_PERIODS=2
+AC_MATCH_THRESH=0.5
+SEED=42
+MIN_LENGTH="5"
+MAX_LENGTH="256"
 
 # =============================================================================
-# CCA PARAMETERS
+# CCA PARAMETERS (from analysis.log)
 # =============================================================================
 
-NUM_MODES=10            # Number of CCA modes to visualize
-FILTER_OUTLIERS="true"  # Filter outliers in alignment plot
-TEST_FRAC="0.2"         # Held-out fraction for reporting test correlations
+NUM_MODES=10
+FILTER_OUTLIERS="true"
 
-# -----------------------------------------------------------------------------
-# CCA / Ridge defaults (one-run, no tuning)
-# -----------------------------------------------------------------------------
-RIDGE_NORM="global"               # global | per_episode
-GRID_UNIT_ESTIMATOR="axis_mode"   # axis_mode | median_euclid
+RIDGE_NORM="global"
+GRID_UNIT_ESTIMATOR="axis_mode"
 GLOBAL_SCALE_QUANTILE="0.95"
 GLOBAL_TARGET_RADIUS="9.0"
 RIDGE_RADIUS_SCALE="0.8"
-RIDGE_AGGREGATE="max"             # max | sum
-RIDGE_NORMALIZE_PATH="false"      # true | false
+RIDGE_AGGREGATE="max"
+RIDGE_NORMALIZE_PATH="false"
 
 # =============================================================================
 # DERIVED PATHS
@@ -112,7 +96,7 @@ FIGURES_DIR="${EXP_DIR}/figures"
 LOGS_DIR="${EXP_DIR}/logs"
 
 CYCLES_NPZ="${DATA_DIR}/pkd_cycles.npz"
-LOG_FILE="${LOGS_DIR}/analysis.log"
+LOG_FILE="${LOGS_DIR}/analysis_extra.log"
 
 # =============================================================================
 # ENVIRONMENT SETUP
@@ -124,20 +108,19 @@ cd /root/backup/kinematics
 
 mkdir -p "${DATA_DIR}" "${FIGURES_DIR}" "${LOGS_DIR}"
 
-# Link source routes
+# Link source routes into analysis dir for consistency
 if [ ! -f "${DATA_DIR}/routes.npz" ]; then
     ln -s "${SOURCE_ROUTES}" "${DATA_DIR}/routes.npz" 2>/dev/null || cp "${SOURCE_ROUTES}" "${DATA_DIR}/routes.npz"
 fi
 
-# Log to both console and file
+# Log to both console and file (separate log to avoid polluting the original analysis.log)
 exec > >(tee -a "${LOG_FILE}") 2>&1
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║         META-RL ALIGNMENT ANALYSIS PIPELINE                  ║"
+echo "║   META-RL ALIGNMENT ANALYSIS PIPELINE (100k Maze) — EXTRA    ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
-echo "Collection:    ${COLLECTION_TAG}"
 echo "Experiment:    ${EXP_NAME}"
 echo "Source routes: ${SOURCE_ROUTES}"
 echo "Model:         ${MODEL_CKPT}"
@@ -145,35 +128,15 @@ echo "Device:        ${DEVICE}"
 echo "Started:       $(date)"
 echo ""
 echo "Output: ${EXP_DIR}/"
-echo "  ├── data/     - cycles and routes"
-echo "  ├── figures/  - CCA plots"
-echo "  └── logs/     - pipeline log"
+echo "  ├── data/"
+echo "  ├── figures/"
+echo "  └── logs/"
 echo ""
 
-# Verify source routes exist
 if [ ! -f "${SOURCE_ROUTES}" ]; then
     echo "[ERROR] Source routes not found: ${SOURCE_ROUTES}"
-    echo "Please run the collection first."
     exit 1
 fi
-
-# Show source routes info
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Source Routes Info:"
-python -W ignore -c "
-import numpy as np
-data = np.load('${SOURCE_ROUTES}', allow_pickle=True)
-seeds = data['routes_seed']
-ep_lens = data['routes_ep_len']
-success = data['routes_success'] if 'routes_success' in data.files else None
-print(f'  Trajectories: {len(seeds)}')
-print(f'  Unique seeds: {len(np.unique(seeds))}')
-print(f'  Ep lengths:   min={ep_lens.min()}, max={ep_lens.max()}, mean={ep_lens.mean():.1f}')
-if success is not None:
-    print(f'  Success rate: {100.0*success.mean():.1f}%')
-"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
 
 # =============================================================================
 # STEP 1: PKD Cycle Sampling
@@ -186,10 +149,9 @@ if [ "${SKIP_PKD}" = true ]; then
     echo "│ STEP 1: PKD Cycle Sampling [SKIPPED]                         │"
     echo "╰──────────────────────────────────────────────────────────────╯"
     echo ""
-
     if [ ! -f "${CYCLES_NPZ}" ]; then
         echo "[ERROR] Cycles file not found: ${CYCLES_NPZ}"
-        echo "Run without --skip-pkd first."
+        echo "This script skips PKD by default, but it can only skip if EXP_NAME matches an existing run."
         exit 1
     fi
     echo "[INFO] Using existing: ${CYCLES_NPZ}"
@@ -204,16 +166,12 @@ else
     echo "  ├── warmup_periods:  ${WARMUP_PERIODS}"
     echo "  ├── sample_periods:  ${SAMPLE_PERIODS}"
     echo "  ├── ac_match_thresh: ${AC_MATCH_THRESH}"
-    echo "  ├── min_length:      ${MIN_LENGTH:-none}"
-    echo "  └── max_length:      ${MAX_LENGTH:-none}"
+    echo "  ├── min_length:      ${MIN_LENGTH}"
+    echo "  └── max_length:      ${MAX_LENGTH}"
     echo ""
 
     PKD_START=$(date +%s)
-
-    # Build length filter arguments
-    LENGTH_ARGS=""
-    [ -n "${MIN_LENGTH}" ] && LENGTH_ARGS="${LENGTH_ARGS} --min_length=${MIN_LENGTH}"
-    [ -n "${MAX_LENGTH}" ] && LENGTH_ARGS="${LENGTH_ARGS} --max_length=${MAX_LENGTH}"
+    LENGTH_ARGS="--min_length=${MIN_LENGTH} --max_length=${MAX_LENGTH}"
 
     python -W ignore analysis/pkd_cycle_sampler.py \
         --model_ckpt="${MODEL_CKPT}" \
@@ -245,7 +203,7 @@ echo "╰───────────────────────�
 echo ""
 echo "Parameters:"
 echo "  ├── num_modes:       ${NUM_MODES}"
-echo "  └── filter_outliers: ${FILTER_OUTLIERS}"
+echo "  ├── filter_outliers: ${FILTER_OUTLIERS}"
 echo "  ├── ridge_norm:      ${RIDGE_NORM}"
 echo "  ├── grid_unit:       ${GRID_UNIT_ESTIMATOR}"
 echo "  ├── global_scale_q:  ${GLOBAL_SCALE_QUANTILE}"
@@ -255,11 +213,11 @@ echo ""
 
 CCA_START=$(date +%s)
 
-# Build CCA arguments
-CCA_ARGS="--num_modes=${NUM_MODES} --pca_dim_x=${PCA_DIM_X} --pca_dim_y=${PCA_DIM_Y}"
+CCA_ARGS="--num_modes=${NUM_MODES}"
 [ "${FILTER_OUTLIERS}" = "true" ] && CCA_ARGS="${CCA_ARGS} --filter_outliers"
 CCA_ARGS="${CCA_ARGS} --ridge_norm=${RIDGE_NORM} --grid_unit_estimator=${GRID_UNIT_ESTIMATOR} --global_scale_quantile=${GLOBAL_SCALE_QUANTILE} --global_target_radius=${GLOBAL_TARGET_RADIUS} --ridge_radius_scale=${RIDGE_RADIUS_SCALE} --ridge_aggregate=${RIDGE_AGGREGATE}"
 [ "${RIDGE_NORMALIZE_PATH}" = "true" ] && CCA_ARGS="${CCA_ARGS} --ridge_normalize_path"
+CCA_ARGS="${CCA_ARGS} --color_by=all"
 
 python -W ignore analysis/cca_alignment.py \
     --cycles_npz="${CYCLES_NPZ}" \
@@ -304,10 +262,9 @@ TOTAL_TIME=$((PKD_TIME + CCA_TIME + STATS_TIME))
 
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║                    ANALYSIS COMPLETE                         ║"
+echo "║                ANALYSIS EXTRA COMPLETE                       ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
-echo "Collection: ${COLLECTION_TAG}"
 echo "Experiment: ${EXP_NAME}"
 echo "Finished:   $(date)"
 echo ""
@@ -321,24 +278,7 @@ echo "  CCA Analysis:  ${CCA_TIME}s"
 echo "  Statistics:    ${STATS_TIME}s"
 echo "  Total:         ${TOTAL_TIME}s"
 echo ""
-echo "Output: ${EXP_DIR}/"
-echo "  data/"
-echo "    ├── routes.npz (symlink)"
-echo "    └── pkd_cycles.npz"
-echo "  figures/"
-echo "    ├── cca_lollipop.png"
-echo "    ├── fig5_by_length.png"
-echo "    ├── fig5_by_displacement.png"
-echo "    ├── fig5_by_angle.png"
-echo "    ├── alignment_3d.html"
-echo "    ├── all_paths_overlay.png"
-echo "    ├── cca_results.npz"
-echo "    ├── length_distribution.png"
-echo "    ├── xy_trajectories.png"
-echo "    ├── seed_coverage.png"
-echo "    └── action_distribution.png"
-echo "  logs/"
-echo "    └── analysis.log"
+echo "Logs: ${LOG_FILE}"
 echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
 

@@ -9,21 +9,6 @@ cca_alignment.py — v0 → current
 - Figure-5 variants: save `fig5_by_length.png`, `fig5_by_displacement.png`, `fig5_by_angle.png`.
 - 3D interactive: save `alignment_3d.html` (CM0/CM1/CM2, neural vs behavior).
 - Ridge radius tuning: expose `--ridge_radius_scale`; **default 0.6**.
-
-Color-by metric glossary (all computed per *kept* cycle, after outlier filtering, and do NOT affect CCA):
-- Length: episode length metadata from routes (`routes_ep_len`).
-- Displacement: ||p_T|| on the (centered + grid-unit normalized) path.
-- Angle: arctan2(p_T.y, p_T.x) on the same normalized path.
-- Curvature: mean turning angle between consecutive step directions (0=straight, pi=wiggly).
-- coverage_ratio: (#unique visited grid-cells) / T (higher = more efficient coverage).
-- loopiness: 1 - coverage_ratio (higher = more revisits / local looping).
-- turn_rate: mean[ step_t != step_{t-1} ] on quantized grid steps (higher = more frequent turning).
-- Rg: radius of gyration (sqrt(mean ||p - mean(p)||^2)) in grid units (higher = more spatial spread).
-- r_max: max_t ||p_t|| in grid units (furthest distance from start).
-- tortuosity: path_length / (r_max + eps) in grid units (higher = more circuitous motion).
-- action_entropy: Shannon entropy of the action distribution over the cycle prefix (higher = more diverse actions).
-- pkd_match_ratio: PKD cycle match ratio from `pkd_cycles.npz` (higher = more stable limit-cycle match).
-- pkd_convergence_diff: PKD convergence diff from `pkd_cycles.npz` (lower = more converged; may be absent -> NaN).
 """
 
 
@@ -163,162 +148,6 @@ def _rotate_path_to_disp(path: np.ndarray, eps: float = 1e-8) -> np.ndarray:
     R = np.array([[c, -s], [s, c]], dtype=np.float32)
     return (path @ R.T).astype(np.float32)
 
-
-def _trajectory_curvature(path: np.ndarray, tol: float = 1e-4, eps: float = 1e-12) -> float:
-    """
-    Curvature / "wiggliness" metric for a 2D trajectory.
-
-    We compute step vectors v_t = p_{t+1} - p_t, drop near-zero steps (||v|| <= tol),
-    then return the *mean turning angle* between consecutive (normalized) step vectors:
-
-        curvature = mean_t arccos( <v_t, v_{t+1}> / (||v_t|| ||v_{t+1}||) )
-
-    Range: [0, pi]. 0 = perfectly straight, larger = more frequent/sharper turns.
-    """
-    if path is None:
-        return float("nan")
-    path = np.asarray(path, dtype=np.float32)
-    if path.ndim != 2 or path.shape[0] < 3:
-        return 0.0
-
-    v = np.diff(path, axis=0)  # (T-1, 2)
-    norms = np.linalg.norm(v, axis=1)
-    keep = norms > tol
-    v = v[keep]
-    if v.shape[0] < 2:
-        return 0.0
-
-    v = v / (np.linalg.norm(v, axis=1, keepdims=True) + eps)
-    cosang = np.sum(v[1:] * v[:-1], axis=1)
-    cosang = np.clip(cosang, -1.0, 1.0)
-    ang = np.arccos(cosang)
-    return float(np.mean(ang))
-
-
-def _path_metrics_on_grid(
-    path_xy: np.ndarray,
-    grid_unit: float,
-    L_use: int | None = None,
-    step_tol: float = 1e-6,
-) -> tuple[float, float, float, float, float, float]:
-    """
-    Compute Chaser-friendly scalar metrics from a 2D path, using the same "grid unit"
-    notion as the ridge embedding pipeline.
-
-    Returns (coverage_ratio, loopiness, turn_rate, Rg, r_max, tortuosity) where:
-    - coverage_ratio = unique_grid_cells / T
-    - loopiness      = 1 - coverage_ratio
-    - turn_rate      = mean_t [step_t != step_{t-1}] over non-zero steps in quantized grid coords
-    - Rg             = radius of gyration in grid units (sqrt(mean ||x - mean(x)||^2))
-    - r_max          = max_t ||x_t|| in grid units
-    - tortuosity     = path_len / (r_max + eps) in grid units
-
-    Notes:
-    - We center-align the path at the first point (like ridge preprocessing).
-    - We optionally truncate to L_use to match the cycle prefix used for CCA.
-    - We remove the last point for coverage/turn computations (consistent with overlay plotting).
-    """
-    if path_xy is None:
-        return float("nan"), float("nan"), float("nan"), float("nan"), float("nan"), float("nan")
-    p = np.asarray(path_xy, dtype=np.float32)
-    if p.ndim != 2 or p.shape[0] == 0:
-        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-
-    if L_use is not None:
-        L_use = int(L_use)
-        if L_use > 0:
-            p = p[:L_use]
-
-    # Center at origin
-    p = p - p[0]
-
-    grid_unit = float(grid_unit)
-    if not np.isfinite(grid_unit) or grid_unit <= 1e-8:
-        grid_unit = 1.0
-
-    # Grid coordinates (float)
-    pg = (p / grid_unit).astype(np.float32)
-
-    # r_max in grid units
-    if pg.shape[0] > 0:
-        r_max = float(np.max(np.linalg.norm(pg, axis=1)))
-    else:
-        r_max = 0.0
-
-    # Path length in grid units
-    if pg.shape[0] >= 2:
-        d = np.diff(pg, axis=0)
-        path_len = float(np.sum(np.linalg.norm(d, axis=1)))
-    else:
-        path_len = 0.0
-
-    # Rg (radius of gyration) on float grid coords
-    if pg.shape[0] > 0:
-        mu = pg.mean(axis=0, keepdims=True)
-        rg = float(np.sqrt(np.mean(np.sum((pg - mu) ** 2, axis=1))))
-    else:
-        rg = 0.0
-
-    # For coverage/turning, quantize to integer grid cells
-    cells = np.rint(pg).astype(np.int32)
-    if cells.shape[0] > 1:
-        cells = cells[:-1]
-    T = int(cells.shape[0])
-    if T <= 0:
-        tort = float(path_len / (r_max + 1e-8)) if r_max > 0 else 0.0
-        return 0.0, 1.0, 0.0, rg, r_max, tort
-
-    # Unique cells visited
-    uniq = int(np.unique(cells, axis=0).shape[0])
-    coverage_ratio = float(uniq / max(1, T))
-    loopiness = float(1.0 - coverage_ratio)
-
-    # Turn rate based on changes in non-zero step direction
-    if cells.shape[0] < 3:
-        tort = float(path_len / (r_max + 1e-8)) if r_max > 0 else 0.0
-        return coverage_ratio, loopiness, 0.0, rg, r_max, tort
-
-    steps = np.diff(cells, axis=0)  # (T-1, 2) in grid coords
-    move = np.any(np.abs(steps) > step_tol, axis=1)
-    steps = steps[move]
-    if steps.shape[0] < 2:
-        tort = float(path_len / (r_max + 1e-8)) if r_max > 0 else 0.0
-        return coverage_ratio, loopiness, 0.0, rg, r_max, tort
-
-    turns = np.any(steps[1:] != steps[:-1], axis=1)
-    turn_rate = float(np.mean(turns)) if turns.size > 0 else 0.0
-    tort = float(path_len / (r_max + 1e-8)) if r_max > 0 else 0.0
-    return coverage_ratio, loopiness, turn_rate, rg, r_max, tort
-
-
-def _action_entropy(actions: np.ndarray, eps: float = 1e-12) -> float:
-    """
-    Shannon entropy of the empirical action distribution (in nats).
-    Returns NaN if actions is missing/empty.
-    """
-    if actions is None:
-        return float("nan")
-    a = np.asarray(actions)
-    if a.size == 0:
-        return float("nan")
-    a = a.astype(np.int64, copy=False).reshape(-1)
-    a = a[np.isfinite(a)]
-    if a.size == 0:
-        return float("nan")
-    a = a[a >= 0]
-    if a.size == 0:
-        return float("nan")
-    k = int(np.max(a)) + 1
-    if k <= 0:
-        return float("nan")
-    cnt = np.bincount(a, minlength=k).astype(np.float64)
-    p = cnt / max(1.0, float(cnt.sum()))
-    p = p[p > 0]
-    if p.size == 0:
-        return float("nan")
-    return float(-np.sum(p * np.log(p + eps)))
-
-
 def plot_3d_interactive(
     U_means,
     V_means,
@@ -434,7 +263,7 @@ def plot_alignment_multi(U_means, V_means, metadata, out_dir, prefix="fig5"):
     """
     for key, values in metadata.items():
         out_path = os.path.join(out_dir, f"{prefix}_by_{key.lower()}.png")
-        plot_alignment(U_means, V_means, values, out_path, title=f"Alignment colored by {key}", color_label=str(key))
+        plot_alignment(U_means, V_means, values, out_path, title=f"Alignment colored by {key}")
         print(f"Saved alignment plot colored by {key} to {out_path}")
 
 
@@ -568,14 +397,13 @@ def plot_lollipop(scores, out_path, title="Canonical Correlation", xlabel="Mode"
     plt.savefig(out_path, dpi=300)
     plt.close()
 
-def plot_alignment(U_means, V_means, colors, out_path, title="Alignment", color_label="Value"):
+def plot_alignment(U_means, V_means, colors, out_path, title="Alignment"):
     """
     Scatter plot of U vs V
     U_means: (N_cycles, d) - typically CM0 vs CM1
     V_means: (N_cycles, d)
     colors: (N_cycles,) for color coding (e.g. length)
     """
-    colors = np.asarray(colors, dtype=np.float64)
     n_points = len(colors)
     print(f"  Plotting {n_points} points")
     
@@ -588,27 +416,16 @@ def plot_alignment(U_means, V_means, colors, out_path, title="Alignment", color_
     jitter_u = np.random.randn(n_points, 2) * jitter_scale_u
     jitter_v = np.random.randn(n_points, 2) * jitter_scale_v
 
-    # Determine colormap based on color range (robust to NaNs / missing metrics)
-    finite = np.isfinite(colors)
-    if not finite.any():
-        # Metric missing; plot with a dummy constant color so we don't crash.
-        colors = np.zeros_like(colors, dtype=np.float64)
-        c_min, c_max, c_range = 0.0, 0.0, 0.0
-        color_label = f"{color_label} (all NaN)"
-    else:
-        c_min = float(np.nanmin(colors))
-        c_max = float(np.nanmax(colors))
-        c_range = float(c_max - c_min)
-        # Replace NaNs for plotting (keep points, but color them at the min)
-        colors = np.where(finite, colors, c_min)
-
-    if n_points > 0:
-        if c_max <= 20 and c_range > 0:
+    # Determine colormap based on length range
+    if len(colors) > 0:
+        c_min, c_max = colors.min(), colors.max()
+        c_range = c_max - c_min
+        if c_max <= 20:
             cmap = 'tab20'
-        elif c_range < 20 and c_range > 0:
-            cmap = 'jet'
+        elif c_range < 20:
+            cmap = 'jet'  # High contrast for small range at high offset
         else:
-            cmap = 'turbo'
+            cmap = 'turbo' # Better than viridis for distinguishing values
     else:
         cmap = 'viridis'
     
@@ -621,7 +438,7 @@ def plot_alignment(U_means, V_means, colors, out_path, title="Alignment", color_
     axes[0].set_title(f"Neural State (CM0 vs CM1) - {n_points} points")
     axes[0].set_xlabel("CM 0")
     axes[0].set_ylabel("CM 1")
-    plt.colorbar(sc1, ax=axes[0], label=color_label)
+    plt.colorbar(sc1, ax=axes[0], label='Episode Length')
     
     # Right: Behavior (V)
     sc2 = axes[1].scatter(
@@ -632,7 +449,7 @@ def plot_alignment(U_means, V_means, colors, out_path, title="Alignment", color_
     axes[1].set_title(f"Behavior Ridge (CM0 vs CM1) - {n_points} points")
     axes[1].set_xlabel("CM 0")
     axes[1].set_ylabel("CM 1")
-    plt.colorbar(sc2, ax=axes[1], label=color_label)
+    plt.colorbar(sc2, ax=axes[1], label='Episode Length')
     
     plt.suptitle(f"{title} (n={n_points})")
     plt.tight_layout()
@@ -693,18 +510,6 @@ def main():
     parser.add_argument("--ridge_grid_size", type=int, default=21, help="Ridge grid size (default 21 => 441D).")
     parser.add_argument("--ridge_radius_scale", type=float, default=0.6, help="Radius scale for ridge radiance field (smaller => more local/contrast).")
 
-    # -------------------------------------------------------------------------
-    # Color-by metrics (plot selection)
-    # -------------------------------------------------------------------------
-    parser.add_argument(
-        "--color_by",
-        type=str,
-        default="all",
-        help="Comma-separated list of color-by metrics to plot. "
-             "Default: all. Supported: length, displacement, angle, curvature, coverage_ratio, loopiness, turn_rate, rg, r_max, tortuosity, action_entropy, pkd_match_ratio, pkd_convergence_diff. "
-             "Example: --color_by=length,displacement,curvature",
-    )
-
     args = parser.parse_args()
     
     os.makedirs(args.out_dir, exist_ok=True)
@@ -718,12 +523,6 @@ def main():
     cycles_hidden = pkd_data['cycles_hidden']
     cycles_route_id = pkd_data['cycles_route_id']
     cycles_match_ratio = pkd_data['cycles_match_ratio']
-    # Optional PKD stability field (may not exist in older pkd_cycles.npz)
-    cycles_convergence_diff = None
-    for k in ("cycles_convergence_diff", "cycles_conv_diff", "cycles_convergence_diffs", "cycles_convergence"):
-        if k in getattr(pkd_data, "files", []):
-            cycles_convergence_diff = pkd_data[k]
-            break
     
     print(f"Loading routes from {args.routes_npz}")
     routes_data = np.load(args.routes_npz, allow_pickle=True)
@@ -747,7 +546,6 @@ def main():
     # ---------------------------------------------------------------------
     routes_xy = routes_data['routes_xy']
     routes_ep_len = routes_data['routes_ep_len']
-    routes_actions = routes_data['routes_actions'] if 'routes_actions' in routes_data.files else None
     
     num_cycles = len(cycles_hidden)
     print(f"\nProcessing {num_cycles} cycles")
@@ -919,12 +717,6 @@ def main():
     cycle_lengths: list[float] = []
     cycle_disps: list[float] = []
     cycle_angles: list[float] = []
-    cycle_curvatures: list[float] = []
-    cycle_pkd_match_ratio: list[float] = []
-    cycle_pkd_convergence_diff: list[float] = []
-    sample_route_ids: list[int] = []
-    sample_L_uses: list[int] = []
-    sample_grid_units: list[float] = []
 
     # Ridge embedding statistics
     ridge_vecs: list[np.ndarray] = []
@@ -1000,7 +792,6 @@ def main():
             scale = 1.0
 
         est_grid_steps.append(grid_unit)
-        sample_grid_units.append(float(grid_unit))
 
         # Convert to (approx) tile/grid units
         path_grid = (path_centered / grid_unit).astype(np.float32)
@@ -1009,7 +800,6 @@ def main():
         d_vec = path_grid[-1] if len(path_grid) > 0 else np.array([0.0, 0.0], dtype=np.float32)
         disp_val = float(np.linalg.norm(d_vec))
         ang_val = float(np.arctan2(float(d_vec[1]), float(d_vec[0])))
-        curv_val = _trajectory_curvature(path_grid)
 
         # Optional rotation (can reduce orientation variance, but may remove informative angle structure)
         if args.rotate_to_disp:
@@ -1046,14 +836,6 @@ def main():
         cycle_lengths.append(float(routes_ep_len[r_id]))
         cycle_disps.append(disp_val)
         cycle_angles.append(ang_val)
-        cycle_curvatures.append(curv_val)
-        cycle_pkd_match_ratio.append(float(cycles_match_ratio[i]))
-        if cycles_convergence_diff is None:
-            cycle_pkd_convergence_diff.append(float("nan"))
-        else:
-            cycle_pkd_convergence_diff.append(float(cycles_convergence_diff[i]))
-        sample_route_ids.append(int(r_id))
-        sample_L_uses.append(int(L_use))
 
     if skipped_nan > 0:
         print(f"\n[WARN] Skipped cycles due to NaNs: {skipped_nan}/{num_cycles}")
@@ -1063,12 +845,6 @@ def main():
     cycle_lengths = np.asarray(cycle_lengths, dtype=np.float64)
     cycle_disps = np.asarray(cycle_disps, dtype=np.float64)
     cycle_angles = np.asarray(cycle_angles, dtype=np.float64)
-    cycle_curvatures = np.asarray(cycle_curvatures, dtype=np.float64)
-    cycle_pkd_match_ratio = np.asarray(cycle_pkd_match_ratio, dtype=np.float64)
-    cycle_pkd_convergence_diff = np.asarray(cycle_pkd_convergence_diff, dtype=np.float64)
-    sample_route_ids = np.asarray(sample_route_ids, dtype=np.int32)
-    sample_L_uses = np.asarray(sample_L_uses, dtype=np.int32)
-    sample_grid_units = np.asarray(sample_grid_units, dtype=np.float64)
     sample_cycle_ids = np.arange(X.shape[0])
     
     print(f"\n[Matrix X (Neural)]")
@@ -1256,12 +1032,6 @@ def main():
         cycle_lengths = cycle_lengths[keep_mask]
         cycle_disps = cycle_disps[keep_mask]
         cycle_angles = cycle_angles[keep_mask]
-        cycle_curvatures = cycle_curvatures[keep_mask]
-        cycle_pkd_match_ratio = cycle_pkd_match_ratio[keep_mask]
-        cycle_pkd_convergence_diff = cycle_pkd_convergence_diff[keep_mask]
-        sample_route_ids = sample_route_ids[keep_mask]
-        sample_L_uses = sample_L_uses[keep_mask]
-        sample_grid_units = sample_grid_units[keep_mask]
 
     # Check spread in canonical space
     u_spread = U_plot[:, :2].std(axis=0)
@@ -1269,12 +1039,11 @@ def main():
     print(f"  U spread (CM0, CM1): {u_spread}")
     print(f"  V spread (CM0, CM1): {v_spread}")
     
-    # Plot Figure 5 and variants (build a full metadata dict first; selection happens below)
-    metadata_base = {
+    # Plot Figure 5 and variants
+    metadata = {
         'Length': cycle_lengths,
         'Displacement': cycle_disps,
-        'Angle': cycle_angles,
-        'Curvature': cycle_curvatures,
+        'Angle': cycle_angles
     }
     
     # Original plot (Length)
@@ -1282,159 +1051,29 @@ def main():
     # plot_alignment(U_plot, V_plot, np.array(cycle_lengths), alignment_path, title="Alignment (z-scored U/V)")
     # print(f"Saved alignment plot to {alignment_path}")
     
-    # -------------------------------------------------------------------------
-    # Compute additional (path-only) metrics (cheap) and decide what to plot
-    # -------------------------------------------------------------------------
-    cov_vals: list[float] = []
-    loop_vals: list[float] = []
-    turn_vals: list[float] = []
-    rg_vals: list[float] = []
-    rmax_vals: list[float] = []
-    tort_vals: list[float] = []
-    aent_vals: list[float] = []
-    for r_id, L_use, gu in zip(sample_route_ids.tolist(), sample_L_uses.tolist(), sample_grid_units.tolist()):
-        path_xy = routes_xy[int(r_id)]
-        try:
-            path_xy = np.asarray(path_xy, dtype=np.float32)
-        except Exception:
-            pass
-        c, l, t, rg, rmax, tort = _path_metrics_on_grid(path_xy, grid_unit=float(gu), L_use=int(L_use))
-        cov_vals.append(c)
-        loop_vals.append(l)
-        turn_vals.append(t)
-        rg_vals.append(rg)
-        rmax_vals.append(rmax)
-        tort_vals.append(tort)
-
-        if routes_actions is None:
-            aent_vals.append(float("nan"))
-        else:
-            a = routes_actions[int(r_id)]
-            try:
-                a = np.asarray(a)
-            except Exception:
-                pass
-            if a is None:
-                aent_vals.append(float("nan"))
-            else:
-                a = np.asarray(a).reshape(-1)
-                if int(L_use) > 0:
-                    a = a[: int(L_use)]
-                aent_vals.append(_action_entropy(a))
-
-    cycle_coverage_ratio = np.asarray(cov_vals, dtype=np.float64)
-    cycle_loopiness = np.asarray(loop_vals, dtype=np.float64)
-    cycle_turn_rate = np.asarray(turn_vals, dtype=np.float64)
-    cycle_Rg = np.asarray(rg_vals, dtype=np.float64)
-    cycle_r_max = np.asarray(rmax_vals, dtype=np.float64)
-    cycle_tortuosity = np.asarray(tort_vals, dtype=np.float64)
-    cycle_action_entropy = np.asarray(aent_vals, dtype=np.float64)
-
-    metadata_all = dict(metadata_base)
-    metadata_all["coverage_ratio"] = cycle_coverage_ratio
-    metadata_all["loopiness"] = cycle_loopiness
-    metadata_all["turn_rate"] = cycle_turn_rate
-    metadata_all["Rg"] = cycle_Rg
-    metadata_all["r_max"] = cycle_r_max
-    metadata_all["tortuosity"] = cycle_tortuosity
-    metadata_all["action_entropy"] = cycle_action_entropy
-    metadata_all["pkd_match_ratio"] = cycle_pkd_match_ratio
-    metadata_all["pkd_convergence_diff"] = cycle_pkd_convergence_diff
-
-    # Parse --color_by (default: all)
-    raw = str(args.color_by).strip()
-    if raw == "" or raw.lower() == "all":
-        color_by = [
-            "Length",
-            "Displacement",
-            "Angle",
-            "Curvature",
-            "coverage_ratio",
-            "loopiness",
-            "turn_rate",
-            "Rg",
-            "r_max",
-            "tortuosity",
-            "action_entropy",
-            "pkd_match_ratio",
-            "pkd_convergence_diff",
-        ]
-    else:
-        req = [s.strip().lower() for s in raw.split(",") if s.strip()]
-        canon: list[str] = []
-        for s in req:
-            if s in ("length",):
-                canon.append("Length")
-            elif s in ("displacement", "disp"):
-                canon.append("Displacement")
-            elif s in ("angle",):
-                canon.append("Angle")
-            elif s in ("curvature", "wiggliness"):
-                canon.append("Curvature")
-            elif s in ("coverage_ratio", "coverage"):
-                canon.append("coverage_ratio")
-            elif s in ("turn_rate", "turnrate"):
-                canon.append("turn_rate")
-            elif s in ("rg", "r_g", "radius_gyration"):
-                canon.append("Rg")
-            elif s in ("r_max", "rmax"):
-                canon.append("r_max")
-            elif s in ("loopiness", "revisit_ratio", "revisit"):
-                canon.append("loopiness")
-            elif s in ("tortuosity", "circuitousness"):
-                canon.append("tortuosity")
-            elif s in ("action_entropy", "entropy", "act_entropy"):
-                canon.append("action_entropy")
-            elif s in ("pkd_match_ratio", "match_ratio", "pkd_match"):
-                canon.append("pkd_match_ratio")
-            elif s in ("pkd_convergence_diff", "convergence_diff", "pkd_conv_diff", "conv_diff"):
-                canon.append("pkd_convergence_diff")
-            else:
-                print(f"[WARN] Unknown --color_by metric '{s}', skipping.")
-        seen = set()
-        color_by = [x for x in canon if not (x in seen or seen.add(x))]
-
-    metadata_to_plot = {k: metadata_all[k] for k in color_by if k in metadata_all}
-
-    # Multi-feature plots (2D)
-    plot_alignment_multi(U_plot, V_plot, metadata_to_plot, args.out_dir, prefix="fig5")
+    # Multi-feature plots
+    plot_alignment_multi(U_plot, V_plot, metadata, args.out_dir, prefix="fig5")
     
-    # 3D Interactive Plot (only for geometric metrics; Chaser extras remain 2D-only)
+    # 3D Interactive Plot (keep original length-colored output; also export displacement-colored)
     if U_plot.shape[1] >= 3:
-        geo3d = [k for k in color_by if k in ("Length", "Displacement", "Angle", "Curvature")]
-        if len(geo3d) > 0:
-            # Keep legacy filename: alignment_3d.html (prefer Length if present)
-            primary = "Length" if "Length" in geo3d else geo3d[0]
-            colorscales = {
-                "Length": "Viridis",
-                "Displacement": "Plasma",
-                "Angle": "Viridis",
-                "Curvature": "Cividis",
-            }
-            plot_3d_interactive(
-                U_plot[:, :3],
-                V_plot[:, :3],
-                metadata_all,
-                os.path.join(args.out_dir, "alignment_3d.html"),
-                title=f"3D Alignment (colored by {primary})",
-                color_by=primary,
-                colorscale=colorscales.get(primary, "Viridis"),
-            )
-
-            # Additional 3D exports for selected geo metrics (excluding primary)
-            for k in geo3d:
-                if k == primary:
-                    continue
-                out = os.path.join(args.out_dir, f"alignment_3d_by_{k.lower()}.html")
-                plot_3d_interactive(
-                    U_plot[:, :3],
-                    V_plot[:, :3],
-                    metadata_all,
-                    out,
-                    title=f"3D Alignment (colored by {k})",
-                    color_by=k,
-                    colorscale=colorscales.get(k, "Viridis"),
-                )
+        plot_3d_interactive(
+            U_plot[:, :3],
+            V_plot[:, :3],
+            metadata,
+            os.path.join(args.out_dir, "alignment_3d.html"),
+            title="3D Alignment (colored by Length)",
+            color_by="Length",
+            colorscale="Viridis",
+        )
+        plot_3d_interactive(
+            U_plot[:, :3],
+            V_plot[:, :3],
+            metadata,
+            os.path.join(args.out_dir, "alignment_3d_by_displacement.html"),
+            title="3D Alignment (colored by Displacement)",
+            color_by="Displacement",
+            colorscale="Plasma",
+        )
     else:
         print(f"[WARN] Only {U_plot.shape[1]} modes available, skipping 3D plot.")
     
@@ -1553,16 +1192,6 @@ def main():
         cycle_lengths=np.array(cycle_lengths),
         cycle_disps=np.array(cycle_disps),
         cycle_angles=np.array(cycle_angles),
-        cycle_curvatures=np.array(cycle_curvatures),
-        cycle_coverage_ratio=np.array(cycle_coverage_ratio),
-        cycle_loopiness=np.array(cycle_loopiness),
-        cycle_turn_rate=np.array(cycle_turn_rate),
-        cycle_Rg=np.array(cycle_Rg),
-        cycle_r_max=np.array(cycle_r_max),
-        cycle_tortuosity=np.array(cycle_tortuosity),
-        cycle_action_entropy=np.array(cycle_action_entropy),
-        cycle_pkd_match_ratio=np.array(cycle_pkd_match_ratio),
-        cycle_pkd_convergence_diff=np.array(cycle_pkd_convergence_diff),
         ridge_cosine_sim_mean=ridge_cos_mean,
         num_cycles=num_cycles_used,
         num_cycles_total=int(num_cycles),

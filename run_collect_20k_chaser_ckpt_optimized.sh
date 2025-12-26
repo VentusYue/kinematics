@@ -51,7 +51,7 @@ done
 # CONFIGURATION
 # =============================================================================
 
-EXP_NAME="run_20k_chaser_ckpt_optimized"
+EXP_NAME="run_20k_chaser_ckpt_optimized_1024_1024"
 
 MODEL_CKPT="/root/logs/ppo/meta-rl-chaser-easy-step1024-n1k-trial10-gpu1=lr2e4/saved/model_step_128319488.tar"
 
@@ -68,8 +68,8 @@ ADAPT_EPISODES=6           # Episodes for adaptation (sampling)
 RECORD_EPISODES=2          # Episodes after adaptation (typically deterministic)
 SEED_OFFSET=0              # Starting seed
 
-MAX_STEPS=512              # Max steps per episode
-MAX_EP_LEN=256             # Max episode length to keep (also used by selector)
+MAX_STEPS=1024              # Max steps per episode
+MAX_EP_LEN=1024             # Max episode length to keep (also used by selector)
 
 DISTRIBUTION_MODE="easy"   # "easy" or "hard"
 REQUIRE_SUCCESS=1          # 1 = only keep successful trajectories

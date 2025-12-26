@@ -52,7 +52,7 @@ done
 SOURCE_ROUTES="/root/backup/kinematics/experiments/run_optimized_100k_maze_collect/data/routes.npz"
 
 # Output experiment name (analysis outputs go under BASE_OUT_DIR/EXP_NAME/)
-EXP_NAME="run_optimized_100k_maze_collect_analysis_ac80"
+EXP_NAME="run_optimized_100k_maze_collect_analysis_ac80_w8"
 
 # Model checkpoint (same as collection)
 # Verified from logs/collection.log
