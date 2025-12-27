@@ -52,3 +52,6 @@ analysis_out/
 analysis_out_test/
 analysis_out_test_fast/
 meta_eval_traces/
+
+# Large local datasets (do not commit)
+2e5_backup_data/
